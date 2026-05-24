@@ -1,0 +1,28 @@
+{
+  "name": "ha-linux-companion",
+  "version": "1.0.0",
+  "description": "Home Assistant companion for Linux touchscreen panels — Electron",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-gpu-sandbox",
+    "dist": "electron-builder --linux"
+  },
+  "author": "Simone Bonizzardi",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^26.0.0",
+    "systeminformation": "^5.25.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.ha-linux-companion.app",
+    "productName": "HA Linux Companion",
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "arch": ["arm64", "x64"]
+    }
+  }
+}
