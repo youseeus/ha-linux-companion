@@ -51,9 +51,12 @@
     <div class="comp-row"><div class="comp-label">Bluetooth</div><button class="comp-btn secondary" id="comp-bt-toggle">Scan</button></div>
     <div id="comp-bt-list"></div>
     <h3>☀️ Display</h3>
-    <div class="comp-row"><div class="comp-label">Brightness</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-brightness" min="10" max="100" value="100"><span class="comp-val" id="comp-brightness-val">100%</span></div></div>
+    <div class="comp-row" id="comp-brightness-row"><div class="comp-label">Brightness</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-brightness" min="10" max="100" value="100"><span class="comp-val" id="comp-brightness-val">100%</span></div></div>
     <h3>📊 Device</h3>
     <div class="comp-row"><div><div class="comp-label" id="comp-device-name">Panel</div><div class="comp-sub" id="comp-sensor-info">Sensors: --</div></div></div>
+    <h3>🔔 Notifications</h3>
+    <div class="comp-row"><div class="comp-label" id="comp-notif-count">No notifications yet</div><button class="comp-btn secondary" id="comp-notif-clear">Clear</button></div>
+    <div id="comp-notif-list" style="max-height:200px;overflow-y:auto;"></div>
     <h3>⚙ Actions</h3>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-refresh">🔄 Reload</button></div>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-fullscreen">⛶ Fullscreen</button></div>
@@ -71,7 +74,7 @@
   function ipc(name, data) { return window.haCompanion[name](data); }
 
   const volSlider = document.getElementById('comp-volume'), volVal = document.getElementById('comp-volume-val'), muteBtn = document.getElementById('comp-mute');
-  volSlider.addEventListener('input', async () => { volVal.textContent = volSlider.value + '%'; await ipc('setVolume', parseInt(volSlider.value)); });
+  volSlider.addEventListener('input', async () => { volVal.textContent = volSlider.value + '%'; await ipc('setVolume', parseInt(volSlider.value)); try{var c=new(window.AudioContext||window.webkitAudioContext)();var o=c.createOscillator();var g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.setValueAtTime(600,c.currentTime);g.gain.setValueAtTime(0.15,c.currentTime);g.gain.exponentialRampToValueAtTime(0.01,c.currentTime+0.1);o.start(c.currentTime);o.stop(c.currentTime+0.1)}catch(e){} });
   muteBtn.addEventListener('click', async () => { const m = muteBtn.textContent === 'Off'; muteBtn.textContent = m ? 'On' : 'Off'; muteBtn.style.background = m ? '#FF3B30' : '#3A3A3C'; await ipc('setMute', m); });
 
   const brightSlider = document.getElementById('comp-brightness'), brightVal = document.getElementById('comp-brightness-val');
@@ -98,6 +101,31 @@
   document.getElementById('comp-logout').addEventListener('click', () => ipc('logout'));
   document.getElementById('comp-quit').addEventListener('click', () => ipc('quit'));
 
+  // Notification history
+  const notifList = document.getElementById('comp-notif-list');
+  const notifCount = document.getElementById('comp-notif-count');
+  function renderNotifHistory(history) {
+    if (!history || !history.length) {
+      notifCount.textContent = 'No notifications';
+      notifList.innerHTML = '';
+      return;
+    }
+    notifCount.textContent = history.length + ' notification' + (history.length > 1 ? 's' : '');
+    notifList.innerHTML = history.map(function(n) {
+      var d = new Date(n.time);
+      var ts = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+      return '<div style="padding:8px 0;border-bottom:1px solid #2C2C2E"><div style="font-size:13px;font-weight:600">' + n.title + ' <span style="color:#636366;font-size:11px">' + ts + '</span></div><div style="color:#ABABAB;font-size:12px;margin-top:2px">' + n.message + '</div></div>';
+    }).join('');
+  }
+  document.getElementById('comp-notif-clear').addEventListener('click', function() {
+    notifList.innerHTML = '';
+    notifCount.textContent = 'No notifications';
+  });
+  // Load notification history when panel opens
+  var origToggle = togglePanel;
+  togglePanel = function() { open = !open; panel.classList.toggle('open', open); backdrop.classList.toggle('open', open); if(open) ipc('getNotificationHistory').then(renderNotifHistory); };
+  toggle.addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
+
   ipc('getSystemInfo').then(info => {
     if (!info) return;
     if (info.volume !== undefined) { volSlider.value = info.volume; volVal.textContent = info.volume + '%'; }
@@ -105,5 +133,6 @@
     if (info.deviceName) document.getElementById('comp-device-name').textContent = info.deviceName;
     if (info.version) document.getElementById('comp-version').textContent = info.version;
     if (info.sensors) document.getElementById('comp-sensor-info').textContent = 'Sensors: ' + info.sensors;
+    if (!info.hasBacklight) { var br = document.getElementById('comp-brightness-row'); if(br) br.style.display='none'; }
   });
 })();
