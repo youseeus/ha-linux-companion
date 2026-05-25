@@ -5,6 +5,7 @@
 
 const { app, BrowserWindow, ipcMain, Tray, Menu, shell, dialog, screen, Notification } = require('electron');
 const path = require('path');
+const url = require('url');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
@@ -12,6 +13,7 @@ const os = require('os');
 const crypto = require('crypto');
 const si = require('systeminformation');
 
+// ── Config ──
 const CONFIG_DIR = path.join(os.homedir(), '.config', 'ha-linux-companion');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const APP_VERSION = app.getVersion();
@@ -21,14 +23,19 @@ let tray = null;
 let sensorInterval = null;
 let config = null;
 
+// ── Config Management ──
 function ensureConfigDir() {
-  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!fs.existsSync(CONFIG_DIR)) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  }
 }
 
 function loadConfig() {
   ensureConfigDir();
   if (fs.existsSync(CONFIG_FILE)) {
-    try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
+    try {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    } catch { return {}; }
   }
   return {};
 }
@@ -36,13 +43,6 @@ function loadConfig() {
 function saveConfig(data) {
   ensureConfigDir();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2));
-}
-
-const LOG_FILE = path.join(CONFIG_DIR, 'app.log');
-function log(msg) {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${msg}\n`;
-  fs.appendFileSync(LOG_FILE, line);
 }
 
 // ── HA API Client ──
@@ -54,189 +54,422 @@ class HAClient {
     this.webhookId = null;
   }
 
-  async request(method, reqPath, body = null, headers = {}) {
+  async request(method, path, body = null, headers = {}) {
     return new Promise((resolve, reject) => {
       const parsed = new URL(this.baseUrl);
       const isHttps = parsed.protocol === 'https:';
       const lib = isHttps ? https : http;
+
       const options = {
         hostname: parsed.hostname,
         port: parsed.port || (isHttps ? 443 : 80),
-        path: reqPath, method,
-        headers: { 'Content-Type': 'application/json', ...headers },
+        path: path,
+        method: method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers,
+        },
         rejectUnauthorized: false,
       };
-      if (this.token && !headers.Authorization) options.headers['Authorization'] = `Bearer ${this.token}`;
+
+      if (this.token && !headers.Authorization) {
+        options.headers['Authorization'] = `Bearer ${this.token}`;
+      }
+
       const req = lib.request(options, (res) => {
         let chunks = [];
-        res.on('data', (c) => chunks.push(c));
+        res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
           const raw = Buffer.concat(chunks).toString();
-          try { resolve({ status: res.statusCode, data: JSON.parse(raw) }); }
-          catch { resolve({ status: res.statusCode, data: raw }); }
+          try {
+            resolve({ status: res.statusCode, data: JSON.parse(raw), headers: res.headers });
+          } catch {
+            resolve({ status: res.statusCode, data: raw, headers: res.headers });
+          }
         });
       });
+
       req.on('error', reject);
-      req.setTimeout(15000, () => req.destroy(new Error('Connection timeout')));
-      if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
+      req.setTimeout(15000, () => { req.destroy(new Error('Connection timeout')); });
+
+      if (body) {
+        const data = typeof body === 'string' ? body : JSON.stringify(body);
+        req.write(data);
+      }
       req.end();
     });
   }
 
+  // ── Auth Flow: Username + Password (+ optional 2FA) ──
   async initiateAuth() {
-    return this.request('POST', '/auth/login_flow', {
-      client_id: `${this.baseUrl}/`, handler: ['homeassistant', null],
+    // Step 1: Start auth flow
+    const res = await this.request('POST', '/auth/login_flow', {
+      client_id: `${this.baseUrl}/`,
+      handler: ['homeassistant', null],
       redirect_uri: `${this.baseUrl}/?auth_callback=1`,
     });
+    return res;
   }
 
   async submitPassword(flowId, username, password) {
-    return this.request('POST', `/auth/login_flow/${flowId}`, {
-      client_id: `${this.baseUrl}/`, username, password,
+    const res = await this.request('POST', `/auth/login_flow/${flowId}`, {
+      client_id: `${this.baseUrl}/`,
+      username: username,
+      password: password,
     });
+    return res;
   }
 
   async submitMfaCode(flowId, mfaCode) {
-    return this.request('POST', `/auth/login_flow/${flowId}`, {
-      client_id: `${this.baseUrl}/`, user_code: mfaCode,
+    const res = await this.request('POST', `/auth/login_flow/${flowId}`, {
+      client_id: `${this.baseUrl}/`,
+      user_code: mfaCode,
     });
+    return res;
   }
 
   async exchangeCodeForToken(code) {
-    return this.request('POST', '/auth/token',
+    const res = await this.request('POST', '/auth/token',
       `grant_type=authorization_code&code=${encodeURIComponent(code)}&client_id=${encodeURIComponent(this.baseUrl + '/')}`,
       { 'Content-Type': 'application/x-www-form-urlencoded' }
     );
+    return res;
   }
 
-  async webhook(type, data) {
-    if (!this.webhookId) return null;
-    return this.request('POST', `/api/webhook/${this.webhookId}`, { type, data });
-  }
-
-  async registerDevice(name = 'HA Linux Companion') {
-    const deviceId = crypto.randomUUID();
+  // Refresh the access token using a stored refresh token
+  async refreshAccessToken(refreshToken) {
     try {
-      const res = await this.request('POST', '/api/mobile_app/registrations', {
-        device_name: name, app_name: 'HA Linux Companion', app_id: 'ha-linux-companion',
-        app_version: APP_VERSION, device_id: deviceId,
-        os_name: 'Linux', os_version: os.type() + ' ' + os.release(),
-        manufacturer: 'Linux', model: os.arch() + ' ' + os.hostname(),
-        supports_encryption: false,
-      });
-      log('[REG] status: ' + res.status);
-      if ((res.status === 200 || res.status === 201) && res.data && res.data.webhook_id) {
-        this.deviceId = deviceId;
-        this.webhookId = res.data.webhook_id;
-        if (res.data.access_token) this.token = res.data.access_token;
+      const res = await this.request('POST', '/auth/token',
+        `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`,
+        { 'Content-Type': 'application/x-www-form-urlencoded' }
+      );
+      if (res.status === 200 && res.data.access_token) {
+        log('[AUTH] Token refreshed successfully');
+        this.token = res.data.access_token;
+        return { token: res.data.access_token, refresh_token: res.data.refresh_token || refreshToken, expires_in: res.data.expires_in };
+      }
+      log('[AUTH] Token refresh failed: ' + res.status);
+    } catch (e) {
+      log('[AUTH] Token refresh error: ' + e.message);
+    }
+    return null;
+  }
+
+  async registerDevice(deviceName) {
+    // Stable deviceId from MAC address — prevents duplicate registrations
+    if (!this.deviceId) {
+      const mac = getMacAddress();
+      this.deviceId = crypto.createHash('sha256').update(mac || os.hostname()).digest('hex').substring(0, 32);
+    }
+    const deviceId = this.deviceId;
+    this.deviceId = deviceId;
+    try {
+      const res = await this.request('POST', '/api/mobile_app/registrations',
+        JSON.stringify({
+          device_name: deviceName || os.hostname(),
+          app_id: 'io.homeassistant.linux-companion',
+          app_name: 'HA Linux Companion',
+          app_version: APP_VERSION,
+          os_name: 'Linux', os_version: os.release(),
+          manufacturer: 'Raspberry Pi',
+          model: os.hostname(),
+          device_id: deviceId,
+          supports_encryption: false,
+          app_data: {
+            push_url: `http://${getLocalIP()}:0/notify`,
+            push_token: 'pending',
+            push_websocket_channel: true,
+          },
+        }),
+        { 'Content-Type': 'application/json' }
+      );
+      if (res.status === 201 && res.data) {
+        this.webhookId = res.data.webhook_id || res.data.webhookId;
+        this.cloudhookUrl = res.data.cloudhook_url || res.data.cloudhookUrl;
+        log('[REG] status: ' + res.status + ' data: ' + JSON.stringify(res.data));
         return true;
       }
-      log('[REG] FAILED: ' + res.status);
-      return false;
-    } catch (err) { log('[REG] ERROR: ' + err.message); return false; }
+      log('[REG] failed: ' + res.status + ' ' + JSON.stringify(res.data));
+    } catch (e) {
+      log('[REG] error: ' + e.message);
+    }
+    return false;
+  }
+
+  async webhook(type, data = {}) {
+    if (!this.webhookId) return null;
+    try {
+      const res = await this.request('POST',
+        `/api/webhook/${this.webhookId}`,
+        JSON.stringify({ type, data }),
+        { 'Content-Type': 'application/json' }
+      );
+      log('[WEBHOOK] ' + type + ': ' + res.status);
+      return res;
+    } catch (e) {
+      log('[WEBHOOK] error: ' + e.message);
+      return null;
+    }
   }
 
   async updateSensors(sensors) {
     if (!this.webhookId) return;
-    for (const s of sensors) await this.webhook('register_sensor', s);
+
+    // Register sensors first
+    for (const sensor of sensors) {
+      await this.webhook('register_sensor', sensor);
+    }
+
+    // Then update states
     await this.webhook('update_sensor_states', sensors);
+  }
+
+  // Update push_url for an existing registration
+  async updatePushUrl(pushUrl, pushToken) {
+    if (!this.webhookId) return;
+    try {
+      const result = await this.webhook('update_registration', {
+        app_data: {
+          push_url: pushUrl,
+          push_token: pushToken,
+          push_websocket_channel: true,
+        },
+      });
+      log('[PushNotify] Updated push_url: ' + pushUrl + ' → ' + JSON.stringify(result?.data));
+      return true;
+    } catch (e) {
+      log('[PushNotify] Failed to update push_url: ' + e.message);
+      return false;
+    }
   }
 }
 
 let haClient = null;
 
 // ── Sensors ──
+const LOG_FILE = path.join(os.homedir(), '.config', 'ha-linux-companion', 'app.log');
+function log(msg) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${msg}\n`;
+  fs.appendFileSync(LOG_FILE, line);
+  console.log(line.trim());
+}
+
 async function collectSensors() {
   const sensors = [];
+
   try {
+    // CPU Temperature (Raspberry Pi)
     try {
-      const t = parseFloat(fs.readFileSync('/sys/class/thermal/thermal_zone0/temp', 'utf8')) / 1000;
-      sensors.push({ unique_id: 'cpu_temperature', state: t.toFixed(1), type: 'sensor', name: 'CPU Temperature', unit_of_measurement: '°C', device_class: 'temperature', state_class: 'measurement' });
-    } catch (e) {}
+      const tempRaw = fs.readFileSync('/sys/class/thermal/thermal_zone0/temp', 'utf8');
+      const temp = parseFloat(tempRaw) / 1000;
+      sensors.push({
+        unique_id: 'cpu_temperature', state: temp.toFixed(1), type: 'sensor',
+        name: 'CPU Temperature', unit_of_measurement: '°C',
+        device_class: 'temperature', state_class: 'measurement',
+      });
+    } catch (e) { /* not a Pi */ }
+
+    // CPU Usage
     try {
       const cpu = await si.currentLoad();
-      sensors.push({ unique_id: 'cpu_usage', state: cpu.currentLoad.toFixed(1), type: 'sensor', name: 'CPU Usage', unit_of_measurement: '%', state_class: 'measurement' });
+      sensors.push({
+        unique_id: 'cpu_usage', state: cpu.currentLoad.toFixed(1), type: 'sensor',
+        name: 'CPU Usage', unit_of_measurement: '%', state_class: 'measurement',
+      });
     } catch (e) {}
+
+    // RAM
     try {
       const mem = await si.mem();
-      sensors.push({ unique_id: 'ram_usage', state: ((mem.used / mem.total) * 100).toFixed(1), type: 'sensor', name: 'RAM Usage', unit_of_measurement: '%', state_class: 'measurement' });
-      sensors.push({ unique_id: 'ram_free_mb', state: (mem.available / 1048576).toFixed(0), type: 'sensor', name: 'RAM Free', unit_of_measurement: 'MB', state_class: 'measurement' });
+      sensors.push({
+        unique_id: 'ram_usage', state: ((mem.used / mem.total) * 100).toFixed(1), type: 'sensor',
+        name: 'RAM Usage', unit_of_measurement: '%', state_class: 'measurement',
+      });
+      sensors.push({
+        unique_id: 'ram_free_mb', state: (mem.available / 1048576).toFixed(0), type: 'sensor',
+        name: 'RAM Free', unit_of_measurement: 'MB', state_class: 'measurement',
+      });
     } catch (e) {}
+
+    // Disk
     try {
       const disk = await si.fsSize();
       const root = disk.find(d => d.mount === '/') || disk[0];
-      if (root) sensors.push({ unique_id: 'disk_usage', state: root.use.toFixed(1), type: 'sensor', name: 'Disk Usage', unit_of_measurement: '%', state_class: 'measurement' });
+      if (root) {
+        sensors.push({
+          unique_id: 'disk_usage', state: root.use.toFixed(1), type: 'sensor',
+          name: 'Disk Usage', unit_of_measurement: '%', state_class: 'measurement',
+        });
+      }
     } catch (e) {}
+
+    // Uptime
     const upSec = os.uptime();
-    sensors.push({ unique_id: 'system_uptime', state: Math.floor(upSec / 86400) + 'd ' + Math.floor((upSec % 86400) / 3600) + 'h', type: 'sensor', name: 'System Uptime', icon: 'mdi:clock' });
+    sensors.push({
+      unique_id: 'system_uptime',
+      state: Math.floor(upSec / 86400) + 'd ' + Math.floor((upSec % 86400) / 3600) + 'h',
+      type: 'sensor', name: 'System Uptime', icon: 'mdi:clock',
+    });
+
+    // IP
     const nets = os.networkInterfaces();
     for (const name of Object.keys(nets)) {
       for (const n of nets[name]) {
-        if (n.family === 'IPv4' && !n.internal && (name.startsWith('eth') || name.startsWith('wlan') || name.startsWith('end')))
+        if (n.family === 'IPv4' && !n.internal && (name.startsWith('eth') || name.startsWith('wlan') || name.startsWith('end'))) {
           sensors.push({ unique_id: 'ip_address', state: n.address, type: 'sensor', name: 'IP Address', icon: 'mdi:ip-network' });
+        }
       }
     }
-    sensors.push({ unique_id: 'display_state', state: mainWindow && !mainWindow.isDestroyed() ? 'on' : 'off', type: 'binary_sensor', name: 'Display', device_class: 'power' });
-  } catch (err) { log('Sensor error: ' + err.message); }
+
+    // Display
+    sensors.push({
+      unique_id: 'display_state',
+      state: mainWindow && !mainWindow.isDestroyed() ? 'on' : 'off',
+      type: 'binary_sensor', name: 'Display', device_class: 'power',
+    });
+
+  } catch (err) {
+    log('Sensor error: ' + err.message);
+  }
+
   return sensors;
 }
 
 async function startSensorUpdates() {
   if (sensorInterval) clearInterval(sensorInterval);
-  log('[Sensors] Starting, webhook: ' + (haClient ? haClient.webhookId : 'null'));
+  log('[Sensors] Starting updates, webhookId: ' + (haClient ? haClient.webhookId : 'null'));
+
   const update = async () => {
     if (!haClient || !haClient.webhookId) return;
     try {
-      const s = await collectSensors();
-      if (s.length) { await haClient.updateSensors(s); log('[Sensors] ' + s.length + ' updated'); }
-    } catch (err) { log('[Sensors] Error: ' + err.message); }
+      const sensors = await collectSensors();
+      if (sensors.length > 0) {
+        await haClient.updateSensors(sensors);
+        log('[Sensors] ' + sensors.length + ' updated: ' + sensors.map(s => s.unique_id + '=' + s.state).join(', '));
+      }
+    } catch (err) {
+      log('[Sensors] Error: ' + err.message);
+    }
   };
+
   await update();
   sensorInterval = setInterval(update, 60000);
 }
 
-function stopSensorUpdates() { if (sensorInterval) { clearInterval(sensorInterval); sensorInterval = null; } }
+function stopSensorUpdates() {
+  if (sensorInterval) {
+    clearInterval(sensorInterval);
+    sensorInterval = null;
+  }
+}
 
-// ── Window ──
+// ── Window Management ──
 function createMainWindow() {
-  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+
   mainWindow = new BrowserWindow({
-    width: config.windowWidth || sw, height: config.windowHeight || sh,
-    fullscreen: config.fullscreen !== false, autoHideMenuBar: true,
+    width: config.windowWidth || screenWidth,
+    height: config.windowHeight || screenHeight,
+    fullscreen: config.fullscreen !== false,
+    autoHideMenuBar: true,
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, webviewTag: true },
-    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+    },
+    show: false, // Show when ready
   });
-  mainWindow.once('ready-to-show', () => { mainWindow.show(); if (config.fullscreen !== false) mainWindow.setFullScreen(true); });
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+    if (config.fullscreen !== false) {
+      mainWindow.setFullScreen(true);
+    }
+  });
+
+  // Load the app UI
   loadAppView();
-  mainWindow.on('closed', () => { mainWindow = null; });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 }
 
 function loadAppView() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (config.url && config.token) loadDashboard(); else mainWindow.loadFile(path.join(__dirname, 'views', 'login.html'));
+
+  if (config.url && config.token) {
+    // Connected — load HA dashboard
+    loadDashboard();
+  } else {
+    // Not connected — show login
+    loadLoginView();
+  }
 }
 
-let dashboardLoaded = false, authInjected = false;
+function loadLoginView() {
+  mainWindow.loadFile(path.join(__dirname, 'views', 'login.html'));
+}
+
+let dashboardLoaded = false;
+let authInjected = false;
 
 function loadDashboard() {
   if (!config.url) return;
+
   const haUrl = config.url.replace(/\/+$/, '');
-  dashboardLoaded = false; authInjected = false;
-  mainWindow.loadURL(haUrl, { userAgent: 'HA-Linux-Companion/' + APP_VERSION + ' (Linux; ' + os.hostname() + ')' });
+  dashboardLoaded = false;
+  authInjected = false;
+
+  mainWindow.loadURL(haUrl, {
+    userAgent: 'HA-Linux-Companion/' + APP_VERSION + ' (Linux; ' + os.hostname() + ')',
+  });
+
   mainWindow.webContents.removeAllListeners('did-finish-load');
   mainWindow.webContents.on('did-finish-load', () => {
     if (authInjected) return;
     authInjected = true;
-    const injectCode = '(function(){localStorage.setItem("hassTokens",JSON.stringify({hassUrl:"' + haUrl + '",clientId:null,expires:' + (Date.now() + 86400000) + ',refresh_token:false,access_token:"' + config.token + '",expires_in:86400,token_type:"Bearer"}));return true})()';
+
+    const token = config.token;
+    const expires = Date.now() + 86400000;
+    const injectCode = [
+      '(function() {',
+      '  var tokens = {',
+      '    hassUrl: "' + haUrl + '",',
+      '    clientId: null,',
+      '    expires: ' + expires + ',',
+      '    refresh_token: false,',
+      '    access_token: "' + token + '",',
+      '    expires_in: 86400,',
+      '    token_type: "Bearer"',
+      '  };',
+      '  localStorage.setItem("hassTokens", JSON.stringify(tokens));',
+      '  return true;',
+      '})()'
+    ].join('\n');
+
     mainWindow.webContents.executeJavaScript(injectCode).then(() => {
       dashboardLoaded = false;
       mainWindow.webContents.on('did-finish-load', function onLoad() {
         if (dashboardLoaded) return;
         dashboardLoaded = true;
         mainWindow.webContents.removeListener('did-finish-load', onLoad);
-        mainWindow.webContents.insertCSS('ha-sidebar{display:none!important}hui-root{--sidebar-width:0!important}');
-        try { mainWindow.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, 'views', 'overlay.js'), 'utf8')); } catch (e) {}
+        mainWindow.webContents.insertCSS(
+          'ha-sidebar { display: none !important; } ' +
+          'hui-root { --sidebar-width: 0px !important; }'
+        );
+
+        // Inject settings overlay
+        try {
+          const overlayCode = fs.readFileSync(path.join(__dirname, 'views', 'overlay.js'), 'utf8');
+          mainWindow.webContents.executeJavaScript(overlayCode);
+        } catch (e) {
+          log('[Overlay] Error injecting: ' + e.message);
+        }
+
         if (haClient) startSensorUpdates();
         connectNotifications();
       });
@@ -245,130 +478,784 @@ function loadDashboard() {
   });
 }
 
-// ── WebSocket Notifications ──
-let haWs = null, wsReconnectTimer = null;
+// ── Utility: get local LAN IP ──
+function getLocalIP() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const n of nets[name]) {
+      if (n.family === 'IPv4' && !n.internal && (name.startsWith('eth') || name.startsWith('wlan') || name.startsWith('end'))) {
+        return n.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
+
+function getMacAddress() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const n of nets[name]) {
+      if (n.family === 'IPv4' && !n.internal && n.mac && n.mac !== '00:00:00:00:00:00') {
+        return n.mac;
+      }
+    }
+  }
+  return null;
+}
+
+// ── Push Notification Server ──
+// HA creates notify.mobile_app_<device> ONLY if push_url is provided during registration.
+// We run a tiny HTTP server that receives push notifications from HA
+// and displays them as native notifications + overlay popups.
+let pushServer = null;
+let pushPort = 0;
+let pushToken = crypto.randomBytes(16).toString('hex');
+
+function startPushServer() {
+  if (pushServer) return; // already running
+
+  pushServer = http.createServer((req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+
+        // Validate push token if HA sends it
+        if (data.push_token && data.push_token !== pushToken) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid push token' }));
+          return;
+        }
+
+        const title = data.title || 'Home Assistant';
+        const message = data.message || '';
+        log('[PushNotify] Received: ' + title + ': ' + message);
+        showNotification(title, message);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) {
+        log('[PushNotify] Parse error: ' + e.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid json' }));
+      }
+    });
+  });
+
+  // Listen on a random available port
+  pushServer.listen(0, '0.0.0.0', () => {
+    pushPort = pushServer.address().port;
+    log('[PushNotify] Server listening on 0.0.0.0:' + pushPort);
+  });
+
+  pushServer.on('error', (err) => {
+    log('[PushNotify] Server error: ' + err.message);
+  });
+}
+
+function stopPushServer() {
+  if (pushServer) {
+    pushServer.close();
+    pushServer = null;
+    pushPort = 0;
+  }
+}
+
+// ── Notifications via WebSocket ──
+let haWs = null;
+let wsReconnectTimer = null;
 
 function connectNotifications() {
   if (!config.url || !config.token) return;
-  const wsUrl = config.url.replace(/\/+$/, '').replace(/^http/, 'ws') + '/api/websocket';
+
+  const haUrl = config.url.replace(/\/+$/, '');
+  const wsUrl = haUrl.replace(/^http/, 'ws') + '/api/websocket';
+
   log('[WS] Connecting to ' + wsUrl);
+
   const WebSocket = require('ws');
-  try { haWs = new WebSocket(wsUrl, { rejectUnauthorized: false }); } catch (e) { return; }
-  haWs.on('open', () => { haWs.send(JSON.stringify({ type: 'auth', access_token: config.token })); log('[WS] Connected'); });
+
+  try {
+    haWs = new WebSocket(wsUrl, { rejectUnauthorized: false });
+  } catch (e) {
+    log('[WS] Error: ' + e.message);
+    return;
+  }
+
+  haWs.on('open', () => {
+    // Auth
+    haWs.send(JSON.stringify({ type: 'auth', access_token: config.token }));
+    log('[WS] Connected');
+  });
+
   haWs.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
+
       if (msg.type === 'auth_ok') {
-        haWs.send(JSON.stringify({ id: 1, type: 'subscribe_events', event_type: 'call_service' }));
-        haWs.send(JSON.stringify({ id: 2, type: 'subscribe_events', event_type: 'persistent_notifications_updated' }));
-        log('[WS] Subscribed');
+        // Subscribe to HA events
+        haWs.send(JSON.stringify({ id: 1, type: 'subscribe_events', event_type: 'persistent_notifications_updated' }));
+
+        // Subscribe to mobile_app push notification channel (standard HA way)
+        if (config.webhookId) {
+          haWs.send(JSON.stringify({
+            id: 2, type: 'mobile_app/push_notification_channel',
+            webhook_id: config.webhookId, support_confirm: true,
+          }));
+          log('[WS] Subscribed to push notification channel');
+        }
+
+        log('[WS] Authenticated');
       }
+
       if (msg.type === 'event' && msg.event) {
         const ev = msg.event;
-        if (ev.event_type === 'call_service' && ev.data && ev.data.domain === 'notify' && ev.data.service && ev.data.service.startsWith('mobile_app'))
-          showNotification((ev.data.service_data || {}).title || 'HA', (ev.data.service_data || {}).message || '');
-        if (ev.event_type === 'persistent_notifications_updated' && ev.data)
-          for (const [, n] of Object.entries(ev.data)) { if (n.title || n.message) showNotification(n.title || 'Home Assistant', n.message || ''); }
+
+        // Mobile app push notification from HA (standard push channel)
+        if (ev.message !== undefined || ev.title !== undefined) {
+          showNotification(ev.title || 'Home Assistant', ev.message || '');
+          // Confirm receipt
+          if (ev.hass_confirm_id) {
+            haWs.send(JSON.stringify({
+              id: 3, type: 'mobile_app/push_notification_confirm',
+              webhook_id: config.webhookId, confirm_id: ev.hass_confirm_id,
+            }));
+          }
+          return;
+        }
+
+        // Persistent notifications
+        if (ev.event_type === 'persistent_notifications_updated') {
+          const notifs = ev.data || {};
+          for (const [id, n] of Object.entries(notifs)) {
+            if (n.title || n.message) {
+              showNotification(n.title || 'Home Assistant', n.message || '');
+            }
+          }
+        }
       }
-    } catch (e) {}
-  });
-  haWs.on('close', () => { log('[WS] Disconnected'); wsReconnectTimer = setTimeout(connectNotifications, 10000); });
-  haWs.on('error', (err) => { log('[WS] Error: ' + err.message); });
-}
-
-function showNotification(title, message) {
-  log('[Notify] ' + title + ': ' + message);
-  if (Notification.isSupported()) new Notification({ title, body: message }).show();
-  if (mainWindow && !mainWindow.isDestroyed())
-    mainWindow.webContents.executeJavaScript(`(function(){var n=document.createElement('div');n.style.cssText='position:fixed;top:60px;right:16px;z-index:999999;background:rgba(30,30,30,0.95);color:#fff;padding:14px 20px;border-radius:12px;max-width:280px;font-family:sans-serif;font-size:14px;box-shadow:0 4px 20px rgba(0,0,0,0.4);border:1px solid #3A3A3C;transition:opacity 0.3s;cursor:pointer';n.innerHTML='<div style="font-weight:600;margin-bottom:4px">'+${JSON.stringify(title)}+'</div><div style="color:#ABABAB;font-size:13px">'+${JSON.stringify(message)}+'</div>';document.body.appendChild(n);n.onclick=function(){n.style.opacity='0';setTimeout(function(){n.remove()},300)};setTimeout(function(){n.style.opacity='0';setTimeout(function(){n.remove()},300)},5000)})()`).catch(() => {});
-}
-
-// ── System Controls ──
-const { execSync } = require('child_process');
-function runShell(cmd) { try { return execSync(cmd, { timeout: 5000 }).toString().trim(); } catch (e) { return ''; } }
-
-ipcMain.handle('set-volume', (e, v) => { runShell('amixer set Master ' + v + '%'); return true; });
-ipcMain.handle('set-mute', (e, m) => { runShell('amixer set Master ' + (m ? 'mute' : 'unmute')); return true; });
-ipcMain.handle('set-brightness', (e, v) => {
-  runShell('ddcutil setvcp 10 ' + v + ' --sleep-multiplier 0.1 2>/dev/null');
-  try { fs.writeFileSync('/sys/class/backlight/rpi-backlight/brightness', Math.round(v * 2.55).toString()); } catch (e) {}
-  return true;
-});
-ipcMain.handle('bluetooth-scan', async () => {
-  const out = runShell('bluetoothctl --timeout 5 scan on 2>/dev/null; bluetoothctl devices 2>/dev/null');
-  if (!out) return [];
-  return out.split('\n').map(l => { const m = l.match(/Device ([0-9A-F:]+) (.+)/i); return m ? { mac: m[1], name: m[2] } : null; }).filter(Boolean);
-});
-ipcMain.handle('bluetooth-connect', (e, mac) => { runShell('bluetoothctl trust ' + mac + ' && bluetoothctl connect ' + mac); return true; });
-ipcMain.handle('get-system-info', () => {
-  let vol = 50; const m = runShell('amixer get Master 2>/dev/null').match(/\[(\d+)%\]/);
-  if (m) vol = parseInt(m[1]);
-  return { volume: vol, brightness: 100, deviceName: config ? config.deviceName : '', version: 'v' + APP_VERSION, sensors: config && config.registered ? 'active' : 'inactive' };
-});
-ipcMain.handle('logout', () => {
-  stopSensorUpdates(); try { fs.unlinkSync(CONFIG_FILE); } catch (e) {}
-  config = {}; haClient = null;
-  if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.webContents.removeAllListeners('did-finish-load'); mainWindow.loadFile(path.join(__dirname, 'views', 'login.html')); }
-  return true;
-});
-ipcMain.handle('quit', () => app.quit());
-
-// ── Auth ──
-ipcMain.handle('login-with-credentials', async (event, { url: haUrl, username, password, deviceName }) => {
-  try {
-    haUrl = haUrl.replace(/\/+$/, '');
-    const client = new HAClient(haUrl, null);
-    const init = await client.initiateAuth();
-    if (init.status !== 200 || !init.data.flow_id) return { success: false, error: 'Auth init failed: ' + init.status };
-    const result = await client.submitPassword(init.data.flow_id, username, password);
-    if (result.status === 200 && result.data.type === 'create_entry') {
-      const tokenRes = await client.exchangeCodeForToken(result.data.result);
-      if (tokenRes.status === 200 && tokenRes.data.access_token) {
-        client.token = tokenRes.data.access_token;
-        const registered = await client.registerDevice(deviceName || os.hostname());
-        config = { url: haUrl, token: client.token || tokenRes.data.access_token, deviceName: deviceName || os.hostname(), deviceId: client.deviceId, webhookId: client.webhookId, registered, fullscreen: true };
-        saveConfig(config); haClient = client;
-        if (registered) startSensorUpdates();
-        loadDashboard(); return { success: true, registered };
-      }
-      return { success: false, error: 'Token exchange failed' };
+    } catch (e) {
+      // ignore parse errors
     }
-    if (result.data.errors) return { success: false, error: result.data.errors.base || result.data.errors.password || 'Invalid credentials' };
-    return { success: false, error: 'Unexpected: ' + result.status };
-  } catch (err) { return { success: false, error: err.message }; }
-});
+  });
+
+  haWs.on('close', () => {
+    log('[WS] Disconnected, reconnecting in 10s');
+    wsReconnectTimer = setTimeout(connectNotifications, 10000);
+  });
+
+  haWs.on('error', (err) => {
+    log('[WS] Error: ' + err.message);
+  });
+}
+
+// ── Notification System ──
+// Complete notification system with audio, themes, and rich content.
+// Falls back gracefully when system notification daemon is unavailable.
+
+const NOTIFICATION_THEMES = {
+  default:  { accent: '#0A84FF', icon: '🔔', sound: 'default' },
+  success:  { accent: '#30D158', icon: '✅', sound: 'success' },
+  warning:  { accent: '#FFD60A', icon: '⚠️', sound: 'warning' },
+  error:    { accent: '#FF453A', icon: '❌', sound: 'error' },
+  info:     { accent: '#64D2FF', icon: 'ℹ️', sound: 'default' },
+};
+
+// ── Audio Fallback Chain ──
+// Detects audio backend at startup, falls back gracefully
+let audioBackend = 'unknown'; // 'pipewire' | 'pulseaudio' | 'alsa' | 'alsa-dmix' | 'none'
+let alsaDefaultDevice = null;
+
+function detectAudioBackend() {
+  try {
+    // 1. Check PipeWire
+    if (runShell('pgrep -x pipewire') !== '') {
+      audioBackend = 'pipewire';
+      log('[Audio] Backend: PipeWire');
+      return;
+    }
+    // 2. Check PulseAudio
+    if (runShell('pgrep -x pulseaudio') !== '') {
+      audioBackend = 'pulseaudio';
+      log('[Audio] Backend: PulseAudio');
+      return;
+    }
+    // 3. Check ALSA
+    if (runShell('aplay -l 2>/dev/null | grep -q card && echo yes') === 'yes') {
+      audioBackend = 'alsa';
+    log('[Audio] Backend: ALSA (direct only — may conflict with other apps)');
+    return;
+  }
+  audioBackend = 'none';
+  log('[Audio] Backend: No audio device found');
+}
+
+// Generate a notification WAV file in-memory (for aplay fallback)
+function generateWav(freq, durationMs) {
+  const sampleRate = 22050;
+  const numSamples = Math.floor(sampleRate * durationMs / 1000);
+  const dataSize = numSamples * 2; // 16-bit mono
+  const buf = Buffer.alloc(44 + dataSize);
+
+  // WAV header
+  buf.write('RIFF', 0);
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write('WAVE', 8);
+  buf.write('fmt ', 12);
+  buf.writeUInt32LE(16, 16);      // PCM
+  buf.writeUInt16LE(1, 20);        // PCM format
+  buf.writeUInt16LE(1, 22);        // mono
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  buf.writeUInt16LE(2, 32);        // block align
+  buf.writeUInt16LE(16, 34);       // bits per sample
+  buf.write('data', 36);
+  buf.writeUInt32LE(dataSize, 40);
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const envelope = Math.max(0, 1 - t / (durationMs / 1000));
+    const val = Math.floor(Math.sin(2 * Math.PI * freq * t) * envelope * 32000);
+    buf.writeInt16LE(Math.max(-32768, Math.min(32767, val)), 44 + i * 2);
+  }
+  return buf;
+}
+
+// Sound presets: freq array for multi-tone
+const SOUND_PRESETS = {
+  default: [{ f: 880, d: 150 }, { f: 660, d: 150 }],
+  success: [{ f: 523, d: 100 }, { f: 659, d: 100 }, { f: 784, d: 200 }],
+  warning: [{ f: 600, d: 120 }, { f: 400, d: 120 }, { f: 600, d: 150 }],
+  error:   [{ f: 300, d: 200 }, { f: 200, d: 200 }],
+};
+
+// Play notification sound via system audio (fallback from Web Audio)
+function playNotificationSound(soundName) {
+  if (audioBackend === 'none') return;
+  try {
+    const preset = SOUND_PRESETS[soundName] || SOUND_PRESETS.default;
+    // Generate a combined WAV
+    const sampleRate = 22050;
+    let allSamples = [];
+    for (const tone of preset) {
+      const n = Math.floor(sampleRate * tone.d / 1000);
+      for (let i = 0; i < n; i++) {
+        const t = i / sampleRate;
+        const env = Math.max(0, 1 - t / (tone.d / 1000));
+        allSamples.push(Math.floor(Math.sin(2 * Math.PI * tone.f * t) * env * 32000));
+      }
+    }
+    const dataSize = allSamples.length * 2;
+    const buf = Buffer.alloc(44 + dataSize);
+    buf.write('RIFF', 0); buf.writeUInt32LE(36 + dataSize, 4); buf.write('WAVE', 8);
+    buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+    buf.writeUInt16LE(1, 22); buf.writeUInt32LE(sampleRate, 24);
+    buf.writeUInt32LE(sampleRate * 2, 28); buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+    buf.write('data', 36); buf.writeUInt32LE(dataSize, 40);
+    for (let i = 0; i < allSamples.length; i++) {
+      buf.writeInt16LE(Math.max(-32768, Math.min(32767, allSamples[i])), 44 + i * 2);
+    }
+
+    // Write to temp file
+    const tmpWav = path.join(os.tmpdir(), 'ha-companion-notif.wav');
+    fs.writeFileSync(tmpWav, buf);
+
+    // Play via best available method
+    let cmd = null;
+    if (audioBackend === 'pipewire' || audioBackend === 'pulseaudio') {
+      cmd = `paplay "${tmpWav}" 2>/dev/null`;
+    } else if (audioBackend === 'alsa-dmix') {
+      cmd = `aplay -D default "${tmpWav}" 2>/dev/null`;
+    } else {
+      cmd = `aplay "${tmpWav}" 2>/dev/null`;
+    }
+    // Fire and forget — don't block the notification
+    require('child_process').exec(cmd, { timeout: 3000 }, () => {
+      try { fs.unlinkSync(tmpWav); } catch (e) {}
+    });
+  } catch (e) {
+    log('[Audio] playNotificationSound error: ' + e.message);
+  }
+}
+
+// Generate notification sounds using Web Audio API (no external files needed)
+const SOUND_GENERATORS = {
+  default:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(880,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.15);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.3);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.3);})',
+  success:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(523,ctx.currentTime);o.frequency.setValueAtTime(659,ctx.currentTime+0.1);o.frequency.setValueAtTime(784,ctx.currentTime+0.2);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
+  warning:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.type="square";o.frequency.setValueAtTime(600,ctx.currentTime);o.frequency.setValueAtTime(400,ctx.currentTime+0.15);o.frequency.setValueAtTime(600,ctx.currentTime+0.3);g.gain.setValueAtTime(0.2,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
+  error:    '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.type="sawtooth";o.frequency.setValueAtTime(300,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(150,ctx.currentTime+0.4);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
+};
+
+function showNotification(title, message, options = {}) {
+  const theme = NOTIFICATION_THEMES[options.theme] || NOTIFICATION_THEMES.default;
+  const soundName = options.sound || theme.sound;
+  const duration = options.duration || 6000;
+  log('[Notify] ' + title + ': ' + message + (options.theme ? ' [' + options.theme + ']' : ''));
+  addToHistory(title, message);
+
+  try {
+    const { width: sw } = screen.getPrimaryDisplay().workAreaSize;
+    const pw = 340, ph = 110;
+    const px = sw - pw - 16, py = 40;
+    const accent = theme.accent;
+    const icon = options.icon || theme.icon;
+    const soundGen = SOUND_GENERATORS[soundName] || SOUND_GENERATORS.default;
+    const safeTitle = title.replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    const safeMsg = message.replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+    const nw = new BrowserWindow({
+      x: px, y: py, width: pw, height: ph,
+      frame: false, transparent: true, resizable: false,
+      alwaysOnTop: true, skipTaskbar: true, focusable: false,
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+    nw.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+`<!DOCTYPE html><html><head><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:transparent;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+.c{background:rgba(28,28,30,0.96);color:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;animation:in .35s cubic-bezier(.16,1,.3,1);cursor:pointer}
+.a{height:3px;background:${accent}}
+.b{padding:14px 18px 10px;display:flex;align-items:flex-start;gap:10px}
+.i{font-size:20px;flex-shrink:0}
+.t{font-weight:600;font-size:13.5px;line-height:1.3;margin-bottom:2px}
+.m{color:#ababab;font-size:12.5px;line-height:1.4;word-break:break-word}
+.p{height:3px;background:${accent};margin-top:8px;transform-origin:left;animation:pr ${duration}ms linear forwards}
+@keyframes in{from{opacity:0;transform:translateX(50px)}to{opacity:1;transform:translateX(0)}}
+@keyframes out{from{opacity:1}to{opacity:0;transform:translateX(50px)}}
+</style></head><body>
+<div class="c" id="c">
+<div class="a"></div>
+<div class="b"><span class="i">${icon}</span><div><div class="t">${safeTitle}</div><div class="m">${safeMsg}</div></div></div>
+
+</div>
+<script>
+try{var ctx=new(window.AudioContext||window.webkitAudioContext)();(${soundGen})(ctx)}catch(e){}
+document.getElementById('c').onclick=function(){document.getElementById('c').style.animation='out .25s ease forwards';setTimeout(function(){window.close()},260)}
+<\/script></body></html>`));
+    nw.showInactive();
+
+    // Also play sound via system audio as fallback (in case Web Audio fails in Electron)
+    playNotificationSound(soundName);
+  } catch(e) {
+    log('[Notify] Error: ' + e.message);
+  }
+}
+
+function createTray() {
+  try {
+    tray = new Tray(path.join(__dirname, '..', 'assets', 'icon.png'));
+    const contextMenu = Menu.buildFromTemplate([
+      { label: '🏠 Dashboard', click: () => { if (mainWindow) mainWindow.show(); } },
+      { label: '🔄 Reload', click: () => { if (mainWindow) mainWindow.webContents.reload(); } },
+      { type: 'separator' },
+      { label: '⛶ Toggle Fullscreen', click: () => {
+        if (mainWindow) {
+          mainWindow.setFullScreen(!mainWindow.isFullScreen());
+        }
+      }},
+      { type: 'separator' },
+      { label: '⚙️ Settings', click: () => { loadLoginView(); mainWindow.show(); } },
+      { label: '❌ Disconnect', click: () => {
+        config = {};
+        saveConfig(config);
+        stopSensorUpdates();
+        haClient = null;
+        loadLoginView();
+        mainWindow.show();
+      }},
+      { type: 'separator' },
+      { label: 'Quit', click: () => app.quit() },
+    ]);
+    tray.setToolTip('HA Linux Companion');
+    tray.setContextMenu(contextMenu);
+    tray.on('click', () => { if (mainWindow) mainWindow.show(); });
+  } catch (err) {
+    console.log('Tray not available:', err.message);
+  }
+}
+
+// ── IPC Handlers ──
+ipcMain.handle('get-config', () => config);
 
 ipcMain.handle('connect', async (event, { url: haUrl, token, deviceName }) => {
   try {
     haUrl = haUrl.replace(/\/+$/, '');
+
+    // Test connection
     const client = new HAClient(haUrl, token);
     const test = await client.request('GET', '/api/');
-    if (test.status !== 200) return { success: false, error: 'Connection failed: HTTP ' + test.status };
+    if (test.status !== 200) {
+      return { success: false, error: `Connection failed: HTTP ${test.status}` };
+    }
+
+    // Register device — use long-lived token from registration
     const registered = await client.registerDevice(deviceName || os.hostname());
-    config = { url: haUrl, token: client.token || token, deviceName: deviceName || os.hostname(), deviceId: client.deviceId, webhookId: client.webhookId, registered, fullscreen: true };
-    saveConfig(config); haClient = client;
-    if (registered) startSensorUpdates();
-    loadDashboard(); return { success: true, registered };
-  } catch (err) { return { success: false, error: err.message }; }
+    let finalToken = client.token || token;
+
+    // Create a long-lived token for persistent auto-login
+
+    // Save config
+    config = {
+      url: haUrl,
+      token: finalToken,
+      deviceName: deviceName || os.hostname(),
+      deviceId: client.deviceId,
+      webhookId: client.webhookId,
+      registered,
+      fullscreen: true,
+    };
+    saveConfig(config);
+
+    haClient = client;
+
+    if (registered) {
+      console.log('[AUTH] Device registered via token, webhookId:', client.webhookId);
+      startSensorUpdates();
+    }
+
+    // Load dashboard
+    loadDashboard();
+
+    return { success: true, registered };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
-ipcMain.handle('toggle-fullscreen', () => { if (mainWindow) { mainWindow.setFullScreen(!mainWindow.isFullScreen()); return mainWindow.isFullScreen(); } return false; });
-ipcMain.handle('get-sensors', async () => collectSensors());
+ipcMain.handle('disconnect', () => {
+  config = {};
+  saveConfig(config);
+  stopSensorUpdates();
+  haClient = null;
+  loadLoginView();
+  return { success: true };
+});
+
+ipcMain.handle('toggle-fullscreen', () => {
+  if (mainWindow) {
+    mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    config.fullscreen = mainWindow.isFullScreen();
+    saveConfig(config);
+    return mainWindow.isFullScreen();
+  }
+  return false;
+});
+
+ipcMain.handle('get-sensors', async () => {
+  return collectSensors();
+});
+
 ipcMain.handle('get-version', () => APP_VERSION);
-ipcMain.handle('get-config', () => config);
+
+// ── Notification History ──
+const NOTIF_HISTORY_MAX = 50;
+const notifHistory = [];
+
+ipcMain.handle('get-notification-history', () => notifHistory);
+
+function addToHistory(title, message) {
+  notifHistory.unshift({ title, message, time: new Date().toISOString() });
+  if (notifHistory.length > NOTIF_HISTORY_MAX) notifHistory.pop();
+}
+
+// ── System Controls ──
+const { execSync } = require('child_process');
+
+function runShell(cmd) {
+  try {
+    const buf = execSync(cmd, { timeout: 5000, encoding: 'utf8', stdio: ['pipe','pipe','pipe'] });
+    return (buf || '').toString().trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+ipcMain.handle('set-volume', (event, vol) => {
+  runShell('amixer set Master ' + vol + '%');
+  log('[System] Volume set to ' + vol + '%');
+  return true;
+});
+
+ipcMain.handle('set-mute', (event, muted) => {
+  runShell('amixer set Master ' + (muted ? 'mute' : 'unmute'));
+  return true;
+});
+
+ipcMain.handle('set-brightness', (event, val) => {
+  // Try ddcutil first (external monitors)
+  const r = runShell('ddcutil setvcp 10 ' + val + ' --sleep-multiplier 0.1 2>/dev/null');
+  if (!r) {
+    // Raspberry Pi — try rpi-backlight first, then pwm
+    try {
+      const blPath = '/sys/class/backlight/rpi-backlight/brightness';
+      if (fs.existsSync(blPath)) {
+        const maxBright = parseInt(fs.readFileSync('/sys/class/backlight/rpi-backlight/max_brightness', 'utf8').trim());
+        const newVal = Math.round((val / 100) * maxBright);
+        fs.writeFileSync(blPath, newVal.toString());
+      }
+    } catch (e) {
+      log('[System] Brightness failed: ' + e.message);
+    }
+  }
+  log('[System] Brightness set to ' + val + '%');
+  return true;
+});
+
+ipcMain.handle('bluetooth-scan', async () => {
+  const output = runShell('bluetoothctl --timeout 5 scan on 2>/dev/null; bluetoothctl devices 2>/dev/null');
+  if (!output) return [];
+  const devices = [];
+  output.split('\n').forEach(line => {
+    const m = line.match(/Device ([0-9A-F:]+) (.+)/i);
+    if (m) devices.push({ mac: m[1], name: m[2] });
+  });
+  return devices;
+});
+
+ipcMain.handle('bluetooth-connect', (event, mac) => {
+  runShell('bluetoothctl trust ' + mac + ' && bluetoothctl connect ' + mac);
+  return true;
+});
+
+ipcMain.handle('get-system-info', () => {
+  let volume = 50;
+  const volOut = runShell('amixer get Master 2>/dev/null');
+  const volMatch = volOut.match(/\[(\d+)%\]/);
+  if (volMatch) volume = parseInt(volMatch[1]);
+
+  return {
+    volume,
+    brightness: 100,
+    hasBacklight: fs.existsSync('/sys/class/backlight/rpi-backlight/brightness') || runShell('ddcutil detect 2>/dev/null').includes('Display'),
+    deviceName: config ? config.deviceName : 'Unknown',
+    version: 'v' + APP_VERSION,
+    sensors: config && config.registered ? 'active' : 'inactive',
+    audioBackend,
+  };
+});
+
+ipcMain.handle('get-audio-status', () => ({
+  backend: audioBackend,
+  needsSetup: audioBackend === 'alsa' || audioBackend === 'none',
+  suggestion: audioBackend === 'alsa' ? 'Install PipeWire for proper audio mixing (prevents conflicts with squeezelite/LMS)'
+             : audioBackend === 'none' ? 'No audio device detected'
+             : null,
+}));
+
+ipcMain.handle('setup-audio', async () => {
+  const script = path.join(__dirname, '..', 'scripts', 'setup-audio.sh');
+  if (!fs.existsSync(script)) return { success: false, error: 'setup-audio.sh not found' };
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync('bash "' + script + '"', { timeout: 60000 }).toString();
+    detectAudioBackend(); // re-detect
+    return { success: true, output: out, backend: audioBackend };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('logout', () => {
+  stopSensorUpdates();
+  if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
+  config = {};
+  haClient = null;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.removeAllListeners('did-finish-load');
+    mainWindow.loadFile(path.join(__dirname, 'views', 'login.html'));
+  }
+  return true;
+});
+
+ipcMain.handle('quit', () => {
+  app.quit();
+});
+
+ipcMain.handle('login-with-credentials', async (event, { url: haUrl, username, password, deviceName }) => {
+  try {
+    haUrl = haUrl.replace(/\/+$/, '');
+    const client = new HAClient(haUrl, null);
+
+    // Initiate auth flow
+    const init = await client.initiateAuth();
+    if (init.status !== 200 || !init.data.flow_id) {
+      return { success: false, error: `Auth init failed: ${init.status}` };
+    }
+
+    const flowId = init.data.flow_id;
+
+    // Submit credentials
+    const result = await client.submitPassword(flowId, username, password);
+
+    if (result.status === 200 && result.data.type === 'create_entry') {
+      // Success — extract token
+      const code = result.data.result;
+      const tokenRes = await client.exchangeCodeForToken(code);
+      if (tokenRes.status === 200 && tokenRes.data.access_token) {
+        const token = tokenRes.data.access_token;
+        const refreshToken = tokenRes.data.refresh_token || null;
+        client.token = token;
+
+        // Register device — HA returns a long-lived access token
+        const registered = await client.registerDevice(deviceName || os.hostname());
+
+        let finalToken = client.token || token;
+
+        config = {
+          url: haUrl,
+          token: finalToken,
+          refreshToken,
+          tokenExpires: tokenRes.data.expires_in ? Date.now() + tokenRes.data.expires_in * 1000 : null,
+          deviceName: deviceName || os.hostname(),
+          deviceId: client.deviceId,
+          webhookId: client.webhookId,
+          registered, fullscreen: true,
+        };
+        saveConfig(config);
+        haClient = client;
+
+        if (registered) {
+          console.log('[AUTH] Device registered, webhookId:', client.webhookId);
+          startSensorUpdates();
+        }
+        loadDashboard();
+        return { success: true, registered };
+      }
+      return { success: false, error: 'Token exchange failed' };
+    }
+
+    // Check if MFA is required
+    if (result.data.errors) {
+      return { success: false, error: result.data.errors.base || result.data.errors.password || 'Invalid credentials' };
+    }
+
+    if (result.data.step && (result.data.step.id === 'mfa' || result.data.type === 'form')) {
+      return {
+        mfa_required: true,
+        flow_id: flowId,
+        flow_type: result.data.step?.type || 'totp',
+        providers: result.data.step?.data || [],
+      };
+    }
+
+    return { success: false, error: `Unexpected response: ${result.status}` };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ── Submit 2FA code ──
+ipcMain.handle('submit-mfa', async (event, { url: haUrl, flowId, mfaCode }) => {
+  try {
+    const client = new HAClient(haUrl.replace(/\/+$/, ''), null);
+    const result = await client.submitMfaCode(flowId, mfaCode);
+
+    if (result.status === 200 && result.data.type === 'create_entry') {
+      const code = result.data.result;
+      const tokenRes = await client.exchangeCodeForToken(code);
+      if (tokenRes.status === 200 && tokenRes.data.access_token) {
+        const token = tokenRes.data.access_token;
+        const refreshToken = tokenRes.data.refresh_token || null;
+        client.token = token;
+        const registered = await client.registerDevice(os.hostname());
+        let finalToken = client.token || token;
+
+        config = {
+          url: haUrl.replace(/\/+$/, ''), token: finalToken,
+          refreshToken,
+          tokenExpires: tokenRes.data.expires_in ? Date.now() + tokenRes.data.expires_in * 1000 : null,
+          deviceName: os.hostname(),
+          deviceId: client.deviceId, webhookId: client.webhookId,
+          registered, fullscreen: true,
+        };
+        saveConfig(config);
+        haClient = client;
+        loadDashboard();
+        return { success: true, registered };
+      }
+      return { success: false, error: 'Token exchange failed' };
+    }
+
+    if (result.data.errors) {
+      return { success: false, error: result.data.errors.code || 'Invalid code' };
+    }
+    return { success: false, error: `Unexpected: ${result.status}` };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ── Quit app ──
+ipcMain.on('quit', () => app.quit());
 
 // ── App Lifecycle ──
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   config = loadConfig();
+
+  // Detect audio backend for notification sounds
+  detectAudioBackend();
+
+  // Start push notification server first (needed before device registration)
+  startPushServer();
+
+  // Restore HA client if already configured
   if (config.url && config.token) {
-    haClient = new HAClient(config.url, config.token);
-    if (config.deviceId) haClient.deviceId = config.deviceId;
-    if (config.webhookId) haClient.webhookId = config.webhookId;
+    // Check if token is expired and refresh if possible
+    if (config.tokenExpires && Date.now() > config.tokenExpires && config.refreshToken) {
+      log('[AUTH] Token expired, refreshing...');
+      const tempClient = new HAClient(config.url, config.token);
+      const refreshed = await tempClient.refreshAccessToken(config.refreshToken);
+      if (refreshed) {
+        config.token = refreshed.token;
+        if (refreshed.refresh_token) config.refreshToken = refreshed.refresh_token;
+        config.tokenExpires = refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : null;
+        saveConfig(config);
+        log('[AUTH] Token refreshed and saved');
+      } else {
+        log('[AUTH] Token refresh failed, will re-login');
+        config = {};
+        saveConfig(config);
+      }
+    }
+
+    if (config.url && config.token) {
+      haClient = new HAClient(config.url, config.token);
+      if (config.deviceId) haClient.deviceId = config.deviceId;
+      if (config.webhookId) haClient.webhookId = config.webhookId;
+
+      // Wait for push server to be ready, then update push_url
+      const waitForPushServer = setInterval(() => {
+        if (pushPort > 0 && haClient) {
+          clearInterval(waitForPushServer);
+          const pushUrl = `http://${getLocalIP()}:${pushPort}/notify`;
+          haClient.updatePushUrl(pushUrl, pushToken);
+        }
+      }, 500);
+      setTimeout(() => clearInterval(waitForPushServer), 10000);
+    }
   }
+
   createMainWindow();
-  try { tray = new Tray(path.join(__dirname, '..', 'assets', 'icon.png')); tray.setToolTip('HA Linux Companion'); } catch (e) {}
+  createTray();
 });
 
-app.on('window-all-closed', () => {});
-app.on('before-quit', () => stopSensorUpdates());
+app.on('window-all-closed', () => {
+  // Keep running in tray on Linux
+});
+
+app.on('before-quit', () => {
+  stopSensorUpdates();
+  stopPushServer();
+});
+
+// Prevent certificate errors for self-signed certs
+// Accept all self-signed certs (home/local networks)
 app.commandLine.appendSwitch('ignore-certificate-errors');

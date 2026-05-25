@@ -1,49 +1,101 @@
 #!/bin/bash
 # HA Linux Companion — Installer for Raspberry Pi OS
+# Usage: curl -sSL <this-file> | bash
+
 set -e
 
-echo "=== HA Linux Companion Installer ==="
+APP_NAME="ha-linux-companion"
+INSTALL_DIR="/opt/${APP_NAME}"
+SERVICE_FILE="/etc/systemd/service/${APP_NAME}.service"
+REPO_URL="https://github.com/simonebonizzardi/ha-linux-companion"
+NODE_MAJOR=20
 
-# Check Node.js
-if ! command -v node &>/dev/null; then
-  echo "Installing Node.js 20..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║  HA Linux Companion — Installer      ║${NC}"
+echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
+echo ""
+
+# ── Check root ──
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}Please run as root: sudo bash install.sh${NC}"
+  exit 1
 fi
 
-echo "Node.js: $(node -v)"
-echo "npm: $(npm -v)"
+# ── Install Node.js ──
+echo -e "${BLUE}[1/5] Installing Node.js ${NODE_MAJOR}...${NC}"
+if ! command -v node &>/dev/null; then
+  curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -
+  apt-get install -y nodejs
+fi
+echo "  Node $(node --version), npm $(npm --version)"
 
-# Install app
-echo "Installing dependencies..."
+# ── Install dependencies ──
+echo -e "${BLUE}[2/5] Installing system dependencies...${NC}"
+apt-get install -y \
+  libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
+  xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2 \
+  chromium || true
+
+# ── Install app ──
+echo -e "${BLUE}[3/5] Installing application...${NC}"
+mkdir -p "${INSTALL_DIR}"
+
+# Copy all files
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR}/package.json" ]; then
+  cp -r "${SCRIPT_DIR}/"* "${INSTALL_DIR}/"
+else
+  # Running from curl — download from GitHub
+  echo "  Downloading from GitHub..."
+  # TODO: implement GitHub releases download
+  echo -e "${RED}Direct download not yet available. Use git clone.${NC}"
+  exit 1
+fi
+
+cd "${INSTALL_DIR}"
 npm install --production
 
-# Create systemd service
-echo "Creating systemd service..."
-USER=$(whoami)
-cat << EOF | sudo tee /etc/systemd/system/ha-linux-companion.service
-[Unit]
-Description=HA Linux Companion (Electron)
-After=graphical-session.target
+# ── Create systemd user service ──
+echo -e "${BLUE}[4/5] Creating desktop integration...${NC}"
 
-[Service]
-Type=simple
-User=$USER
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
-WorkingDirectory=$(pwd)
-ExecStart=$(which npx) electron . --no-sandbox --disable-gpu-sandbox
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=graphical-session.target
+# Desktop entry
+cat > /usr/share/applications/${APP_NAME}.desktop << EOF
+[Desktop Entry]
+Name=HA Companion
+Comment=Home Assistant Linux Companion
+Exec=${INSTALL_DIR}/run.sh
+Icon=${INSTALL_DIR}/assets/icon.png
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupNotify=true
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable ha-linux-companion
+# Autostart entry
+mkdir -p /etc/xdg/autostart
+cp /usr/share/applications/${APP_NAME}.desktop /etc/xdg/autostart/
 
+# Run script
+cat > "${INSTALL_DIR}/run.sh" << 'RUNEOF'
+#!/bin/bash
+export DISPLAY=:0
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+cd /opt/ha-linux-companion
+npx electron . --no-sandbox --disable-gpu-sandbox
+RUNEOF
+chmod +x "${INSTALL_DIR}/run.sh"
+
+# ── Done ──
 echo ""
-echo "✅ Install complete!"
-echo "Start now:  systemctl --user start ha-linux-companion"
-echo "Auto-start: enabled on boot"
+echo -e "${GREEN}✓ HA Linux Companion installed!${NC}"
+echo ""
+echo "  Run from menu:  Applications → HA Companion"
+echo "  Run from CLI:   ${INSTALL_DIR}/run.sh"
+echo "  Autostart:      Enabled (xdg autostart)"
+echo ""
+echo -e "${BLUE}First launch will show the connection screen.${NC}"
