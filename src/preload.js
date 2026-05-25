@@ -19,4 +19,5 @@ contextBridge.exposeInMainWorld('haCompanion', {
   loginWithCredentials: (data) => ipcRenderer.invoke('login-with-credentials', data),
   getSensors: () => ipcRenderer.invoke('get-sensors'),
   getVersion: () => ipcRenderer.invoke('get-version'),
+  getNotificationHistory: () => ipcRenderer.invoke('get-notification-history'),
 });
