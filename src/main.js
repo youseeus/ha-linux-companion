@@ -140,7 +140,7 @@ class HAClient {
   async refreshAccessToken(refreshToken) {
     try {
       const res = await this.request('POST', '/auth/token',
-        `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`,
+        `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(this.baseUrl + '/')}`,
         { 'Content-Type': 'application/x-www-form-urlencoded' }
       );
       if (res.status === 200 && res.data.access_token) {
@@ -690,11 +690,15 @@ function detectAudioBackend() {
     // 3. Check ALSA
     if (runShell('aplay -l 2>/dev/null | grep -q card && echo yes') === 'yes') {
       audioBackend = 'alsa';
-    log('[Audio] Backend: ALSA (direct only — may conflict with other apps)');
-    return;
+      log('[Audio] Backend: ALSA (direct only — may conflict with other apps)');
+      return;
+    }
+    audioBackend = 'none';
+    log('[Audio] Backend: No audio device found');
+  } catch (e) {
+    log('[Audio] Detection failed: ' + e.message);
+    audioBackend = 'unknown';
   }
-  audioBackend = 'none';
-  log('[Audio] Backend: No audio device found');
 }
 
 // Generate a notification WAV file in-memory (for aplay fallback)
@@ -769,7 +773,9 @@ function playNotificationSound(soundName) {
 
     // Play via best available method
     let cmd = null;
-    if (audioBackend === 'pipewire' || audioBackend === 'pulseaudio') {
+    if (audioBackend === 'pipewire') {
+      cmd = `XDG_RUNTIME_DIR=/run/user/$(id -u) pw-play "${tmpWav}" 2>/dev/null || paplay "${tmpWav}" 2>/dev/null`;
+    } else if (audioBackend === 'pulseaudio') {
       cmd = `paplay "${tmpWav}" 2>/dev/null`;
     } else if (audioBackend === 'alsa-dmix') {
       cmd = `aplay -D default "${tmpWav}" 2>/dev/null`;
@@ -787,10 +793,10 @@ function playNotificationSound(soundName) {
 
 // Generate notification sounds using Web Audio API (no external files needed)
 const SOUND_GENERATORS = {
-  default:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(880,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.15);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.3);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.3);})',
-  success:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(523,ctx.currentTime);o.frequency.setValueAtTime(659,ctx.currentTime+0.1);o.frequency.setValueAtTime(784,ctx.currentTime+0.2);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
-  warning:  '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.type="square";o.frequency.setValueAtTime(600,ctx.currentTime);o.frequency.setValueAtTime(400,ctx.currentTime+0.15);o.frequency.setValueAtTime(600,ctx.currentTime+0.3);g.gain.setValueAtTime(0.2,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
-  error:    '(function(ctx){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.type="sawtooth";o.frequency.setValueAtTime(300,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(150,ctx.currentTime+0.4);g.gain.setValueAtTime(0.3,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.5);o.start(ctx.currentTime);o.stop(ctx.currentTime+0.5);})',
+  default:  '(function(ctx){var t=ctx.currentTime;var notes=[[880,0,0.15],[880,0.2,0.15],[1047,0.45,0.3]];notes.forEach(function(n){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(n[0],t+n[1]);g.gain.setValueAtTime(0.3,t+n[1]);g.gain.exponentialRampToValueAtTime(0.01,t+n[1]+n[2]);o.start(t+n[1]);o.stop(t+n[1]+n[2]);});})',
+  success:  '(function(ctx){var t=ctx.currentTime;var notes=[[523,0,0.1],[659,0.12,0.1],[784,0.24,0.1],[1047,0.36,0.4]];notes.forEach(function(n){var o=ctx.createOscillator();var g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(n[0],t+n[1]);g.gain.setValueAtTime(0.3,t+n[1]);g.gain.exponentialRampToValueAtTime(0.01,t+n[1]+n[2]);o.start(t+n[1]);o.stop(t+n[1]+n[2]);});})',
+  warning:  '(function(ctx){var t=ctx.currentTime;var notes=[[600,0,0.15],[400,0.2,0.15],[600,0.4,0.15],[400,0.6,0.15]];notes.forEach(function(n){var o=ctx.createOscillator();var g=ctx.createGain();o.type="square";o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(n[0],t+n[1]);g.gain.setValueAtTime(0.2,t+n[1]);g.gain.exponentialRampToValueAtTime(0.01,t+n[1]+n[2]);o.start(t+n[1]);o.stop(t+n[1]+n[2]);});})',
+  error:    '(function(ctx){var t=ctx.currentTime;var notes=[[300,0,0.2],[200,0.25,0.2],[300,0.5,0.2],[200,0.75,0.3]];notes.forEach(function(n){var o=ctx.createOscillator();var g=ctx.createGain();o.type="sawtooth";o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(n[0],t+n[1]);g.gain.setValueAtTime(0.25,t+n[1]);g.gain.exponentialRampToValueAtTime(0.01,t+n[1]+n[2]);o.start(t+n[1]);o.stop(t+n[1]+n[2]);});})',
 };
 
 function showNotification(title, message, options = {}) {
