@@ -1,28 +1,36 @@
 {
   "name": "ha-linux-companion",
-  "version": "1.0.0",
-  "description": "Home Assistant companion for Linux touchscreen panels — Electron",
+  "version": "1.5.0",
+  "description": "Home Assistant Companion for Linux — Professional desktop application",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron . --no-sandbox --disable-gpu-sandbox",
-    "dist": "electron-builder --linux"
-  },
-  "author": "Simone Bonizzardi",
-  "license": "MIT",
-  "dependencies": {
-    "electron": "^26.0.0",
-    "systeminformation": "^5.25.0",
-    "ws": "^8.18.0"
-  },
-  "devDependencies": {
-    "electron-builder": "^24.0.0"
+    "start": "electron .",
+    "build": "electron-builder --linux",
+    "build:arm64": "electron-builder --linux --arm64",
+    "build:deb": "electron-builder --linux deb",
+    "build:appimage": "electron-builder --linux AppImage"
   },
   "build": {
     "appId": "com.ha-linux-companion.app",
-    "productName": "HA Linux Companion",
+    "productName": "HA Companion",
+    "directories": { "output": "dist" },
     "linux": {
-      "target": ["AppImage", "deb"],
-      "arch": ["arm64", "x64"]
-    }
+      "icon": "assets/icon.png",
+      "category": "Utility",
+      "target": [
+        { "target": "AppImage", "arch": ["arm64"] },
+        { "target": "deb", "arch": ["arm64"] }
+      ]
+    },
+    "files": ["src/**/*", "assets/**/*"]
+  },
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "electron-builder": "^26.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "systeminformation": "^5.25.0",
+    "ws": "^8.21.0"
   }
 }
