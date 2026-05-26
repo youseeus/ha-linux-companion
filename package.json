@@ -42,8 +42,8 @@
     ]
   },
   "devDependencies": {
-    "electron": "^42.2.0",
-    "electron-builder": "^26.0.0"
+    "electron": "42.2.0",
+    "electron-builder": "^26.8.1"
   },
   "dependencies": {
     "axios": "^1.9.0",
