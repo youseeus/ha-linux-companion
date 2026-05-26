@@ -1017,6 +1017,217 @@ ipcMain.handle('delete-channel', (event, id) => {
   return true;
 });
 
+// ── Display Controls ──
+ipcMain.handle('display-on', () => {
+  runShell('vcgencmd display_power 1 2>/dev/null || xset dpms force on 2>/dev/null');
+  log('[Display] ON');
+  return true;
+});
+ipcMain.handle('display-off', () => {
+  runShell('vcgencmd display_power 0 2>/dev/null || xset dpms force off 2>/dev/null');
+  log('[Display] OFF');
+  return true;
+});
+ipcMain.handle('get-display-state', () => {
+  const r = runShell('vcgencmd display_power 2>/dev/null');
+  return r.includes('display_power=1') ? 'on' : r.includes('display_power=0') ? 'off' : 'unknown';
+});
+
+// ── System Power ──
+ipcMain.handle('reboot-system', () => {
+  log('[System] Reboot requested');
+  runShell('sudo reboot 2>/dev/null || systemctl reboot 2>/dev/null');
+  return true;
+});
+ipcMain.handle('shutdown-system', () => {
+  log('[System] Shutdown requested');
+  runShell('sudo poweroff 2>/dev/null || systemctl poweroff 2>/dev/null');
+  return true;
+});
+
+// ── CPU Governor ──
+ipcMain.handle('get-governor', () => {
+  return runShell('cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null') || 'unknown';
+});
+ipcMain.handle('set-governor', (event, gov) => {
+  if (['performance','powersave','ondemand','conservative','schedutil'].includes(gov)) {
+    runShell('echo ' + gov + ' | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null');
+    log('[CPU] Governor set to ' + gov);
+  }
+  return true;
+});
+
+// ── Network Info ──
+ipcMain.handle('get-network-info', () => {
+  const info = {};
+  // WiFi
+  const iwgetid = runShell('iwgetid -r 2>/dev/null');
+  info.ssid = iwgetid || null;
+  if (info.ssid) {
+    const iwconfig = runShell('iwconfig wlan0 2>/dev/null');
+    const sigMatch = iwconfig.match(/Signal level=(-?\d+) dBm/);
+    info.signalDbm = sigMatch ? parseInt(sigMatch[1]) : null;
+    info.signalPercent = info.signalDbm !== null ? Math.min(100, Math.max(0, 2 * (info.signalDbm + 100))) : null;
+  }
+  // IP
+  info.ipAddress = runShell('hostname -I 2>/dev/null').split(' ')[0] || null;
+  // Gateway
+  const gw = runShell('ip route show default 2>/dev/null');
+  const gwMatch = gw.match(/via (\S+)/);
+  info.gateway = gwMatch ? gwMatch[1] : null;
+  // Interface
+  const ifaceMatch = gw.match(/dev (\S+)/);
+  info.interface = ifaceMatch ? ifaceMatch[1] : null;
+  // DNS
+  const dns = runShell('cat /etc/resolv.conf 2>/dev/null');
+  const dnsMatch = dns.match(/nameserver (\S+)/);
+  info.dns = dnsMatch ? dnsMatch[1] : null;
+  return info;
+});
+
+// ── Audio Output Selector ──
+ipcMain.handle('get-audio-outputs', () => {
+  const outputs = [];
+  const pactl = runShell('pactl list sinks short 2>/dev/null');
+  if (pactl) {
+    pactl.split('\n').forEach(line => {
+      if (!line.trim()) return;
+      const parts = line.split(/\s+/);
+      if (parts.length >= 2) {
+        const sinkId = parts[0];
+        const name = parts[1];
+        // Get description
+        const desc = runShell('pactl get-sink-property ' + sinkId + ' node.description 2>/dev/null');
+        const descClean = desc.replace(/^\s*"|"\s*$/g, '').trim() || name;
+        // Check if default
+        const defSink = runShell('pactl get-default-sink 2>/dev/null');
+        outputs.push({ id: sinkId, name, description: descClean, isDefault: defSink === name });
+      }
+    });
+  }
+  // Fallback: amixer
+  if (!outputs.length) {
+    const amixer = runShell('amixer controls 2>/dev/null');
+    if (amixer.includes('Master')) outputs.push({ id: '0', name: 'ALSA Master', description: 'Default Audio', isDefault: true });
+  }
+  return outputs;
+});
+ipcMain.handle('set-audio-output', (event, sinkName) => {
+  runShell('pactl set-default-sink ' + sinkName + ' 2>/dev/null');
+  log('[Audio] Output set to ' + sinkName);
+  return true;
+});
+
+// ── Hardware Info ──
+ipcMain.handle('get-hardware-info', () => {
+  const hw = {};
+  // Board model
+  hw.boardModel = runShell('cat /sys/firmware/devicetree/base/model 2>/dev/null') || runShell('hostnamectl --static 2>/dev/null') || 'Unknown';
+  // CPU
+  hw.cpuModel = runShell('lscpu 2>/dev/null | grep "Model name" | cut -d: -f2').trim() || 'Unknown';
+  hw.cpuCores = parseInt(runShell('nproc 2>/dev/null')) || 1;
+  hw.cpuFreq = runShell('cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null');
+  if (hw.cpuFreq) hw.cpuFreqMhz = Math.round(parseInt(hw.cpuFreq) / 1000);
+  hw.cpuTemp = runShell('cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null');
+  if (hw.cpuTemp) hw.cpuTempC = (parseInt(hw.cpuTemp) / 1000).toFixed(1);
+  // RAM
+  const memInfo = runShell('free -m 2>/dev/null');
+  const memMatch = memInfo.match(/Mem:\s+(\d+)\s+(\d+)/);
+  if (memMatch) {
+    hw.ramTotalMb = parseInt(memMatch[1]);
+    hw.ramUsedMb = parseInt(memMatch[2]);
+    hw.ramPercent = Math.round((parseInt(memMatch[2]) / parseInt(memMatch[1])) * 100);
+  }
+  // Disk
+  const diskInfo = runShell('df -h / 2>/dev/null | tail -1');
+  const diskMatch = diskInfo.match(/(\S+)\s+(\S+)\s+(\S+)\s+(\d+)%/);
+  if (diskMatch) {
+    hw.diskTotal = diskMatch[1];
+    hw.diskUsed = diskMatch[2];
+    hw.diskFree = diskMatch[3];
+    hw.diskPercent = parseInt(diskMatch[4]);
+  }
+  // Uptime
+  hw.uptime = runShell('uptime -p 2>/dev/null').replace('up ', '') || 'unknown';
+  // Serial
+  hw.serial = runShell('cat /sys/firmware/devicetree/base/serial-number 2>/dev/null') || null;
+  // OS
+  hw.os = runShell('cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d\'"\' -f2') || 'Linux';
+  // Kernel
+  hw.kernel = runShell('uname -r 2>/dev/null');
+  // Electron/Node versions
+  hw.electronVersion = process.versions.electron;
+  hw.nodeVersion = process.version;
+  // App version
+  hw.appVersion = APP_VERSION;
+  // Arch
+  hw.arch = process.arch;
+  return hw;
+});
+
+// ── Update Channel ──
+ipcMain.handle('check-updates', async () => {
+  try {
+    const https = require('https');
+    const data = await new Promise((resolve, reject) => {
+      https.get('https://api.github.com/repos/SimoneB79/ha-linux-companion/releases', {
+        headers: { 'User-Agent': 'ha-linux-companion' }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => resolve(JSON.parse(body)));
+      }).on('error', reject);
+    });
+    const current = APP_VERSION;
+    const latest = data.find(r => !r.prerelease);
+    const latestDev = data.find(r => r.prerelease);
+    return {
+      current,
+      latestStable: latest ? { tag: latest.tag_name, name: latest.name, url: latest.html_url, date: latest.published_at } : null,
+      latestDev: latestDev ? { tag: latestDev.tag_name, name: latestDev.name, url: latestDev.html_url, date: latestDev.published_at } : null,
+      allReleases: data.slice(0, 5).map(r => ({ tag: r.tag_name, name: r.name, prerelease: r.prerelease, date: r.published_at, url: r.html_url })),
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+// ── Night Schedule ──
+const SCHEDULE_FILE = path.join(CONFIG_DIR, 'schedule.json');
+let nightSchedule = { enabled: false, offTime: '23:00', onTime: '07:00' };
+try {
+  if (fs.existsSync(SCHEDULE_FILE)) nightSchedule = { ...nightSchedule, ...JSON.parse(fs.readFileSync(SCHEDULE_FILE, 'utf8')) };
+} catch (e) {}
+
+function saveSchedule() {
+  try { fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(nightSchedule, null, 2)); } catch (e) {}
+}
+
+// Check schedule every minute
+let lastScheduleAction = null;
+setInterval(() => {
+  if (!nightSchedule.enabled) return;
+  const now = new Date();
+  const hhmm = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+  if (hhmm === nightSchedule.offTime && lastScheduleAction !== 'off-' + hhmm) {
+    lastScheduleAction = 'off-' + hhmm;
+    runShell('vcgencmd display_power 0 2>/dev/null || xset dpms force off 2>/dev/null');
+    log('[Schedule] Display OFF at ' + hhmm);
+  }
+  if (hhmm === nightSchedule.onTime && lastScheduleAction !== 'on-' + hhmm) {
+    lastScheduleAction = 'on-' + hhmm;
+    runShell('vcgencmd display_power 1 2>/dev/null || xset dpms force on 2>/dev/null');
+    log('[Schedule] Display ON at ' + hhmm);
+  }
+}, 30000);
+
+ipcMain.handle('get-schedule', () => nightSchedule);
+ipcMain.handle('set-schedule', (event, s) => {
+  nightSchedule = { ...nightSchedule, ...s };
+  saveSchedule();
+  return nightSchedule;
+});
+
 function addToHistory(title, message) {
   notifHistory.unshift({ title, message, time: new Date().toISOString() });
   if (notifHistory.length > NOTIF_HISTORY_MAX) notifHistory.pop();
