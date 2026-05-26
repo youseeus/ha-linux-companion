@@ -24,4 +24,7 @@ contextBridge.exposeInMainWorld('haCompanion', {
   getNotificationHistory: () => ipcRenderer.invoke('get-notification-history'),
   playNotificationSound: (sound) => ipcRenderer.invoke('play-notification-sound', sound),
   listCustomSounds: () => ipcRenderer.invoke('list-custom-sounds'),
+  getChannels: () => ipcRenderer.invoke('get-channels'),
+  updateChannel: (id, settings) => ipcRenderer.invoke('update-channel', id, settings),
+  deleteChannel: (id) => ipcRenderer.invoke('delete-channel', id),
 });

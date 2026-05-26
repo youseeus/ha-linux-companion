@@ -75,6 +75,9 @@
     <div class=\"comp-section-desc\">Ultime notifiche</div>
     <div class=\"comp-row\"><div class=\"comp-label\" id=\"comp-notif-count\">Nessuna notifica</div><button class=\"comp-btn secondary\" id=\"comp-notif-clear\">Cancella</button></div>
     <div id=\"comp-notif-list\" style=\"max-height:200px;overflow-y:auto;\"></div>
+    <h3>\xF0\x9F\x93\xA1 Canali</h3>
+    <div class=\"comp-section-desc\" id=\"comp-channels-desc\">I canali si creano automaticamente quando Home Assistant invia una notifica con <code style=\"color:#64D2FF\">data.channel</code>. Puoi poi personalizzarli da qui.</div>
+    <div id=\"comp-channels-list\"></div>
     <h3>⚙ Actions</h3>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-refresh">🔄 Reload</button></div>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-fullscreen">⛶ Fullscreen</button></div>
@@ -141,7 +144,7 @@
   });
   // Load notification history when panel opens
   var origToggle = togglePanel;
-  togglePanel = function() { open = !open; panel.classList.toggle('open', open); backdrop.classList.toggle('open', open); if(open) ipc('getNotificationHistory').then(renderNotifHistory); };
+  togglePanel = function() { open = !open; panel.classList.toggle('open', open); backdrop.classList.toggle('open', open); if(open) { ipc('getNotificationHistory').then(renderNotifHistory); loadAndRenderChannels(); } };
   toggle.addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
 
   // Notification settings
@@ -233,6 +236,77 @@
       ipc('playNotificationSound', customSelect.value);
     }
   });
+
+  // Channels management
+  var channelsList = document.getElementById('comp-channels-list');
+
+  function renderChannels(chs) {
+    if (!chs || !Object.keys(chs).length) {
+      channelsList.innerHTML = '<div style="color:#636366;font-size:12px;padding:8px 0">Nessun canale ancora. Si creerà al primo invio con data.channel.</div>';
+      return;
+    }
+    var html = '';
+    for (var id in chs) {
+      var ch = chs[id];
+      html += '<div class="comp-notif-row" style="flex-direction:column;align-items:stretch;padding:10px 0;gap:6px">';
+      html += '<div style="display:flex;align-items:center;justify-content:space-between">';
+      html += '<div><span style="font-weight:600;font-size:13px">' + (ch.name || id) + '</span>';
+      html += '<span style="color:#636366;font-size:11px;margin-left:6px">' + id + '</span></div>';
+      html += '<div style="display:flex;gap:8px;align-items:center">';
+      html += '<button class="comp-toggle' + (ch.enabled !== false ? ' on' : '') + '" data-channel="' + id + '" data-field="enabled"></button>';
+      html += '<button class="comp-btn danger" style="padding:4px 10px;font-size:11px" data-delete-channel="' + id + '">✕</button>';
+      html += '</div></div>';
+      html += '<div style="display:flex;gap:8px;align-items:center">';
+      html += '<select class="comp-select" data-channel="' + id + '" data-field="sound" style="flex:1">';
+      ['default','success','warning','error'].forEach(function(s) {
+        html += '<option value="' + s + '"' + (ch.sound === s ? ' selected' : '') + '>' + s.charAt(0).toUpperCase() + s.slice(1) + '</option>';
+      });
+      html += '<option value="__custom__"' + (ch.sound && ch.sound.startsWith('custom:') ? ' selected' : '') + '>🎵 Custom</option>';
+      html += '</select>';
+      html += '<select class="comp-select" data-channel="' + id + '" data-field="priority" style="flex:1">';
+      ['urgent','high','default','low','min'].forEach(function(p) {
+        html += '<option value="' + p + '"' + (ch.priority === p ? ' selected' : '') + '>' + p.charAt(0).toUpperCase() + p.slice(1) + '</option>';
+      });
+      html += '</select>';
+      html += '</div></div>';
+    }
+    channelsList.innerHTML = html;
+
+    // Bind events
+    channelsList.querySelectorAll('[data-field="enabled"]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var chId = btn.dataset.channel;
+        btn.classList.toggle('on');
+        ipc('updateChannel', chId, { enabled: btn.classList.contains('on') });
+      });
+    });
+    channelsList.querySelectorAll('[data-field="sound"]').forEach(function(sel) {
+      sel.addEventListener('change', function() {
+        var val = sel.value;
+        if (val === '__custom__') return;
+        ipc('updateChannel', sel.dataset.channel, { sound: val });
+        ipc('playNotificationSound', val);
+      });
+    });
+    channelsList.querySelectorAll('[data-field="priority"]').forEach(function(sel) {
+      sel.addEventListener('change', function() {
+        ipc('updateChannel', sel.dataset.channel, { priority: sel.value });
+      });
+    });
+    channelsList.querySelectorAll('[data-delete-channel]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var chId = btn.dataset.deleteChannel;
+        ipc('deleteChannel', chId).then(function() { loadAndRenderChannels(); });
+      });
+    });
+  }
+
+  function loadAndRenderChannels() {
+    ipc('getChannels').then(renderChannels);
+  }
+
+  // Expose refresh for auto-creation callback
+  window.__haChannels = { refresh: loadAndRenderChannels };
 
   ipc('getSystemInfo').then(info => {
     if (!info) return;

@@ -483,6 +483,8 @@ function startPushServer() {
           sound: data.push_sound || 'default',
           icon: data.icon,
           actions: data.actions,
+          channel: data.channel,
+          channelName: data.channel_name,
         });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -571,6 +573,8 @@ function connectNotifications() {
             sound: ev.data?.push_sound || 'default',
             icon: ev.data?.icon,
             actions: ev.data?.actions,
+            channel: ev.data?.channel,
+            channelName: ev.data?.channel_name,
           });
           // Confirm receipt
           if (ev.hass_confirm_id) {
@@ -789,10 +793,81 @@ const SOUND_GENERATORS = {
   error:    '(function(ctx){var t=ctx.currentTime;var notes=[[300,0,0.2],[200,0.25,0.2],[300,0.5,0.2],[200,0.75,0.3]];notes.forEach(function(n){var o=ctx.createOscillator();var g=ctx.createGain();o.type="sawtooth";o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(n[0],t+n[1]);g.gain.setValueAtTime(0.25,t+n[1]);g.gain.exponentialRampToValueAtTime(0.01,t+n[1]+n[2]);o.start(t+n[1]);o.stop(t+n[1]+n[2]);});})',
 };
 
+// ── Notification Channels ──
+// Auto-created from HA data.channel, persisted in channels.json
+// Per-channel: enabled, sound, priority, name
+const CHANNELS_FILE = path.join(CONFIG_DIR, 'channels.json');
+let channels = {};
+
+function loadChannels() {
+  try {
+    if (fs.existsSync(CHANNELS_FILE)) {
+      channels = JSON.parse(fs.readFileSync(CHANNELS_FILE, 'utf8'));
+    }
+  } catch (e) {
+    channels = {};
+  }
+}
+
+function saveChannels() {
+  try {
+    fs.writeFileSync(CHANNELS_FILE, JSON.stringify(channels, null, 2));
+  } catch (e) {
+    log('[Channels] Save error: ' + e.message);
+  }
+}
+
+function ensureChannel(channelId, channelName) {
+  if (!channelId) return null;
+  if (!channels[channelId]) {
+    channels[channelId] = {
+      name: channelName || channelId,
+      enabled: true,
+      sound: 'default',
+      priority: 'default',
+      created: Date.now(),
+    };
+    saveChannels();
+    log('[Channels] Created: ' + channelId);
+    // Notify overlay to refresh
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript(
+        `window.__haChannels?.refresh?.()`
+      ).catch(() => {});
+    }
+  }
+  return channels[channelId];
+}
+
+function getEffectiveNotifOptions(options) {
+  const channelId = options.channel;
+  if (!channelId || !channels[channelId]) return options;
+  const ch = channels[channelId];
+  if (!ch.enabled) return null; // channel disabled → suppress
+  return {
+    ...options,
+    priority: options.priority || ch.priority || 'default',
+    sound: options.sound || ch.sound || 'default',
+  };
+}
+
+loadChannels();
+
 function showNotification(title, message, options = {}) {
+  // Channel filtering
+  if (options.channel) {
+    ensureChannel(options.channel, options.channelName);
+    const effective = getEffectiveNotifOptions(options);
+    if (!effective) {
+      log('[Notify] Suppressed (channel "' + options.channel + '" disabled)');
+      return;
+    }
+    options = effective;
+  }
+
   const priority = options.priority || 'default';
   const soundName = options.sound || 'default';
-  log('[Notify] ' + title + ': ' + message + ' [' + priority + ']');
+  log('[Notify] ' + title + ': ' + message + ' [' + priority + ']' + (options.channel ? ' ch=' + options.channel : ''));
   addToHistory(title, message);
 
   // Play sound via system audio
@@ -807,9 +882,10 @@ function showNotification(title, message, options = {}) {
           message,
           priority,
           icon: options.icon,
-          sound: false, // already played via system
+          sound: false,
           duration: options.duration,
           actions: options.actions,
+          channel: options.channel,
         })})`
       );
     } catch (e) {
@@ -927,6 +1003,19 @@ ipcMain.handle('play-notification-sound', (event, sound) => {
 });
 
 ipcMain.handle('list-custom-sounds', () => listCustomSounds());
+
+ipcMain.handle('get-channels', () => channels);
+ipcMain.handle('update-channel', (event, id, settings) => {
+  if (!channels[id]) return { error: 'not found' };
+  Object.assign(channels[id], settings);
+  saveChannels();
+  return channels[id];
+});
+ipcMain.handle('delete-channel', (event, id) => {
+  delete channels[id];
+  saveChannels();
+  return true;
+});
 
 function addToHistory(title, message) {
   notifHistory.unshift({ title, message, time: new Date().toISOString() });
