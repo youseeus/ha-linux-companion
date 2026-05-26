@@ -45,9 +45,16 @@ Tap the ⚙ gear icon (top-right of dashboard) to access:
 
 | Control | Description |
 |---------|-------------|
-| Volume | System volume slider + mute |
-| Brightness | Display brightness (ddcutil or rpi-backlight) |
+| Clock | System time, date, CPU temperature |
+| Display | Brightness, ON/OFF, night scheduling |
+| Audio | Volume, mute, output selector (HDMI/jack/BT) |
+| Network | WiFi SSID, signal strength, IP, gateway, DNS |
 | Bluetooth | Scan and connect devices |
+| Hardware | Board model, CPU temp/freq, RAM, disk, OS, kernel, serial |
+| CPU Governor | Performance / powersave / ondemand |
+| Notifications | Enable, sound, DND, duration, melody, channels |
+| Updates | Check GitHub releases (stable + dev) |
+| Reboot / Shutdown | System power controls |
 | Reload | Refresh the HA dashboard |
 | Fullscreen | Toggle fullscreen mode |
 | Logout | Clear config and return to login |
@@ -131,6 +138,48 @@ Notifications can be organized into channels via `data.channel`. Channels are **
 - Assigned a priority override
 
 Channel settings persist in `~/.config/ha-linux-companion/channels.json` and are configurable from the overlay menu.
+
+## Notification Commands
+
+Control the panel remotely from any Home Assistant automation by sending commands instead of regular notifications:
+
+| Command | Description | Data |
+|---------|-------------|------|
+| `command_screen_on` | Turn display on | — |
+| `command_screen_off` | Turn display off | — |
+| `command_screen_brightness_level` | Set brightness % | `brightness: 0-100` |
+| `command_volume_level` | Set volume | `volume_level: 0.0-1.0` |
+| `command_dnd` | Toggle Do Not Disturb | `dnd: true/false` |
+| `command_bluetooth` | Bluetooth on/off | `bluetooth: turn_on/turn_off` |
+| `command_update_sensors` | Force sensor update | — |
+| `command_open_url` | Navigate to URL | `url: "https://..."` |
+| `command_navigate` | Navigate HA path | `navigate: "/lovelace/0"` |
+| `command_restart_app` | Restart the app | — |
+| `command_reload_dashboard` | Reload dashboard | — |
+| `command_set_wallpaper` | Set background image | `url: "https://..."` |
+| `command_set_theme` | Set HA theme | `theme: "theme_name"` |
+
+Example — turn off display at night:
+```yaml
+automation:
+  - alias: "Panel display off at night"
+    trigger:
+      - platform: time
+        at: "23:00:00"
+    action:
+      - service: notify.mobile_app_pannello
+        data:
+          message: command_screen_off
+```
+
+Example — dim brightness in the evening:
+```yaml
+service: notify.mobile_app_pannello
+data:
+  message: command_screen_brightness_level
+  data:
+    brightness: 30
+```
 
 ## Building
 
