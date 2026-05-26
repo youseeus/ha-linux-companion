@@ -84,8 +84,53 @@ Stored in `~/.config/ha-linux-companion/config.json`:
 
 ## Notifications
 
-After login, the app connects via WebSocket to receive real-time notifications.
-Send from HA using the `notify.mobile_app_<device_name>` service.
+Real-time push notifications from Home Assistant, displayed as toast overlays on the dashboard.
+
+### Sending notifications
+
+Use the standard `notify.mobile_app_<device_name>` service:
+
+```yaml
+service: notify.mobile_app_pannello
+data:
+  title: "🔔 Alert"
+  message: "Front door opened!"
+  data:
+    priority: high
+    push_sound: warning
+    channel: alarm
+    channel_name: Allarmi
+```
+
+### Toast overlay
+
+- Custom HTML/CSS toast injected into the Lovelace dashboard
+- Animated slide-in/out with progress bar for auto-dismiss
+- Up to 3 stacked toasts
+- Priority levels: `urgent` (persistent + action button), `high`, `default`, `low`, `min`
+- Color-coded borders: 🔴 urgent, 🟡 high, 🔵 default, ⚪ low, ⚫ min
+
+### Notification settings (⚙ menu)
+
+| Setting | Description |
+|---------|-------------|
+| Enable | Toggle all notifications |
+| Sound | Toggle notification sounds |
+| Do Not Disturb | Silence everything |
+| Popup duration | 4s / 6s / 10s / Never |
+| Melody | Default / Success / Warning / Error / Custom |
+
+Custom sounds: place `.wav`, `.ogg`, `.mp3`, or `.flac` files in `~/.config/ha-linux-companion/sounds/`.
+
+### Channels
+
+Notifications can be organized into channels via `data.channel`. Channels are **auto-created** when HA first sends a notification with that channel ID. Each channel can be individually:
+
+- Enabled / disabled
+- Assigned a custom sound
+- Assigned a priority override
+
+Channel settings persist in `~/.config/ha-linux-companion/channels.json` and are configurable from the overlay menu.
 
 ## Building
 
