@@ -29,6 +29,14 @@
     .comp-version { font-size:11px;color:#636366; }
     #comp-backdrop { position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.3);z-index:99997;display:none; }
     #comp-backdrop.open { display:block; }
+    .comp-toggle { position:relative;width:44px;height:26px;background:#3A3A3C;border-radius:13px;cursor:pointer;transition:background 0.2s;border:none;flex-shrink:0; }
+    .comp-toggle.on { background:#30D158; }
+    .comp-toggle::after { content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;background:#fff;border-radius:10px;transition:transform 0.2s; }
+    .comp-toggle.on::after { transform:translateX(18px); }
+    .comp-select { background:#2C2C2E;color:#fff;border:1px solid #3A3A3C;border-radius:6px;padding:4px 8px;font-size:12px;font-family:inherit;min-width:100px; }
+    .comp-notif-row { display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #2C2C2E;font-size:13px; }
+    .comp-notif-row .comp-label { font-size:13px; }
+    .comp-section-desc { font-size:11px;color:#636366;margin-bottom:8px; }
   `;
   document.head.appendChild(style);
 
@@ -54,9 +62,15 @@
     <div class="comp-row" id="comp-brightness-row"><div class="comp-label">Brightness</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-brightness" min="10" max="100" value="100"><span class="comp-val" id="comp-brightness-val">100%</span></div></div>
     <h3>📊 Device</h3>
     <div class="comp-row"><div><div class="comp-label" id="comp-device-name">Panel</div><div class="comp-sub" id="comp-sensor-info">Sensors: --</div></div></div>
-    <h3>🔔 Notifications</h3>
-    <div class="comp-row"><div class="comp-label" id="comp-notif-count">No notifications yet</div><button class="comp-btn secondary" id="comp-notif-clear">Clear</button></div>
-    <div id="comp-notif-list" style="max-height:200px;overflow-y:auto;"></div>
+    <h3>\uD83D\uDD14 Notifications</h3>
+    <div class=\"comp-notif-row\"><div class=\"comp-label\">🔔 Notifiche</div><button class=\"comp-toggle\" id=\"comp-notif-enabled\"></button></div>
+    <div class=\"comp-notif-row\"><div class=\"comp-label\">Suono</div><button class=\"comp-toggle on\" id=\"comp-notif-sound\"></button></div>
+    <div class=\"comp-notif-row\"><div class=\"comp-label\">🌙 Non disturbare</div><button class=\"comp-toggle\" id=\"comp-notif-dnd\"></button></div>
+    <div class=\"comp-notif-row\"><div class=\"comp-label\">Durata popup</div><select class=\"comp-select\" id=\"comp-notif-duration\"><option value=\"4000\">4 sec</option><option value=\"6000\" selected>6 sec</option><option value=\"10000\">10 sec</option><option value=\"0\">Mai</option></select></div>
+    <div class=\"comp-notif-row\"><div class=\"comp-label\">Melodia</div><select class=\"comp-select\" id=\"comp-notif-melody\"><option value=\"default\">Default</option><option value=\"success\">Success</option><option value=\"warning\">Warning</option><option value=\"error\">Error</option></select></div>
+    <div class=\"comp-section-desc\">Ultime notifiche</div>
+    <div class=\"comp-row\"><div class=\"comp-label\" id=\"comp-notif-count\">Nessuna notifica</div><button class=\"comp-btn secondary\" id=\"comp-notif-clear\">Cancella</button></div>
+    <div id=\"comp-notif-list\" style=\"max-height:200px;overflow-y:auto;\"></div>
     <h3>⚙ Actions</h3>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-refresh">🔄 Reload</button></div>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-fullscreen">⛶ Fullscreen</button></div>
@@ -125,6 +139,47 @@
   var origToggle = togglePanel;
   togglePanel = function() { open = !open; panel.classList.toggle('open', open); backdrop.classList.toggle('open', open); if(open) ipc('getNotificationHistory').then(renderNotifHistory); };
   toggle.addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
+
+  // Notification settings
+  var notifEnabledBtn = document.getElementById('comp-notif-enabled');
+  var notifSoundBtn = document.getElementById('comp-notif-sound');
+  var notifDndBtn = document.getElementById('comp-notif-dnd');
+  var notifDuration = document.getElementById('comp-notif-duration');
+  var notifMelody = document.getElementById('comp-notif-melody');
+
+  // Load saved notif settings
+  var notifSettings = JSON.parse(localStorage.getItem('ha_notif_settings') || '{}');
+  if (notifSettings.enabled === false) notifEnabledBtn.classList.remove('on'); else notifEnabledBtn.classList.add('on');
+  if (notifSettings.sound === false) notifSoundBtn.classList.remove('on'); else notifSoundBtn.classList.add('on');
+  if (notifSettings.dnd) notifDndBtn.classList.add('on'); else notifDndBtn.classList.remove('on');
+  if (notifSettings.duration) notifDuration.value = notifSettings.duration;
+  if (notifSettings.melody) notifMelody.value = notifSettings.melody;
+
+  function saveNotifSettings() {
+    localStorage.setItem('ha_notif_settings', JSON.stringify(notifSettings));
+  }
+
+  notifEnabledBtn.addEventListener('click', function() {
+    notifSettings.enabled = !notifEnabledBtn.classList.contains('on');
+    notifEnabledBtn.classList.toggle('on'); saveNotifSettings();
+  });
+  notifSoundBtn.addEventListener('click', function() {
+    notifSettings.sound = !notifSoundBtn.classList.contains('on');
+    notifSoundBtn.classList.toggle('on'); saveNotifSettings();
+    // Preview sound
+    if (notifSettings.sound) ipc('playNotificationSound', notifMelody.value);
+  });
+  notifDndBtn.addEventListener('click', function() {
+    notifSettings.dnd = !notifDndBtn.classList.contains('on');
+    notifDndBtn.classList.toggle('on'); saveNotifSettings();
+  });
+  notifDuration.addEventListener('change', function() {
+    notifSettings.duration = parseInt(notifDuration.value); saveNotifSettings();
+  });
+  notifMelody.addEventListener('change', function() {
+    notifSettings.melody = notifMelody.value; saveNotifSettings();
+    ipc('playNotificationSound', notifMelody.value);
+  });
 
   ipc('getSystemInfo').then(info => {
     if (!info) return;

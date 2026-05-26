@@ -882,6 +882,11 @@ const notifHistory = [];
 
 ipcMain.handle('get-notification-history', () => notifHistory);
 
+ipcMain.handle('play-notification-sound', (event, sound) => {
+  playNotificationSound(sound || 'default');
+  return true;
+});
+
 function addToHistory(title, message) {
   notifHistory.unshift({ title, message, time: new Date().toISOString() });
   if (notifHistory.length > NOTIF_HISTORY_MAX) notifHistory.pop();
