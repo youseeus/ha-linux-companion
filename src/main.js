@@ -478,6 +478,14 @@ function startPushServer() {
         const title = data.title || 'Home Assistant';
         const message = data.message || '';
         log('[PushNotify] Received: ' + title + ': ' + message);
+
+        // Check if it's a command
+        if (handleNotificationCommand(message, data)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'command_executed' }));
+          return;
+        }
+
         showNotification(title, message, {
           priority: data.priority || 'default',
           sound: data.push_sound || 'default',
@@ -568,6 +576,17 @@ function connectNotifications() {
 
         // Mobile app push notification from HA (standard push channel)
         if (ev.message !== undefined || ev.title !== undefined) {
+          // Check if it's a command
+          if (handleNotificationCommand(ev.message, ev.data)) {
+            // Command executed, confirm and skip toast
+            if (ev.hass_confirm_id) {
+              haWs.send(JSON.stringify({
+                id: 3, type: 'mobile_app/push_notification_confirm',
+                webhook_id: config.webhookId, confirm_id: ev.hass_confirm_id,
+              }));
+            }
+            return;
+          }
           showNotification(ev.title || 'Home Assistant', ev.message || '', {
             priority: ev.data?.priority || 'default',
             sound: ev.data?.push_sound || 'default',
@@ -852,6 +871,135 @@ function getEffectiveNotifOptions(options) {
 }
 
 loadChannels();
+
+// ── Notification Commands ──
+// HA can send commands via notify that execute actions instead of showing a toast
+function handleNotificationCommand(message, data) {
+  if (!message || typeof message !== 'string') return false;
+  const cmd = message.trim().toLowerCase();
+  const d = data || {};
+
+  switch (cmd) {
+    case 'command_screen_on':
+      runShell('vcgencmd display_power 1 2>/dev/null || xset dpms force on 2>/dev/null');
+      log('[Command] screen_on');
+      return true;
+
+    case 'command_screen_off':
+      runShell('vcgencmd display_power 0 2>/dev/null || xset dpms force off 2>/dev/null');
+      log('[Command] screen_off');
+      return true;
+
+    case 'command_screen_brightness_level':
+      if (d.brightness !== undefined) {
+        const val = Math.max(10, Math.min(100, parseInt(d.brightness)));
+        // Try rpi-backlight
+        try {
+          const blPath = '/sys/class/backlight/rpi-backlight/brightness';
+          if (fs.existsSync(blPath)) {
+            const maxBright = parseInt(fs.readFileSync('/sys/class/backlight/rpi-backlight/max_brightness', 'utf8').trim());
+            fs.writeFileSync(blPath, Math.round((val / 100) * maxBright).toString());
+          }
+        } catch (e) {}
+        runShell('ddcutil setvcp 10 ' + val + ' --sleep-multiplier 0.1 2>/dev/null');
+        log('[Command] brightness=' + val);
+      }
+      return true;
+
+    case 'command_volume_level':
+      if (d.volume_level !== undefined) {
+        const vol = Math.max(0, Math.min(100, Math.round(parseFloat(d.volume_level) * 100)));
+        runShell('amixer set Master ' + vol + '%');
+        log('[Command] volume=' + vol + '%');
+      }
+      return true;
+
+    case 'command_dnd':
+      // Toggle app DND from HA
+      const dndState = d.dnd;
+      if (dndState !== undefined) {
+        // Store DND in file for overlay to read
+        try {
+          const dndFile = path.join(CONFIG_DIR, 'dnd');
+          fs.writeFileSync(dndFile, dndState ? '1' : '0');
+        } catch (e) {}
+        log('[Command] dnd=' + dndState);
+      }
+      return true;
+
+    case 'command_bluetooth':
+      if (d.bluetooth === 'turn_on' || d.bluetooth === 'turn_off') {
+        runShell('bluetoothctl power ' + (d.bluetooth === 'turn_on' ? 'on' : 'off'));
+        log('[Command] bluetooth ' + d.bluetooth);
+      }
+      return true;
+
+    case 'command_update_sensors':
+      // Force immediate sensor update
+      updateSensors();
+      log('[Command] update_sensors');
+      return true;
+
+    case 'command_open_url':
+      if (d.url && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(d.url);
+        log('[Command] open_url=' + d.url);
+      }
+      return true;
+
+    case 'command_navigate':
+      if (d.navigate && mainWindow && !mainWindow.isDestroyed()) {
+        const baseUrl = config.url.replace(/\/$/, '');
+        mainWindow.loadURL(baseUrl + '/' + d.navigate.replace(/^\//, ''));
+        log('[Command] navigate=' + d.navigate);
+      }
+      return true;
+
+    case 'command_restart_app':
+      log('[Command] restart_app');
+      app.relaunch();
+      app.exit(0);
+      return true;
+
+    case 'command_reload_dashboard':
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.reload();
+        log('[Command] reload_dashboard');
+      }
+      return true;
+
+    case 'command_set_wallpaper':
+      // Set HA dashboard background via CSS injection
+      if (d.url && mainWindow && !mainWindow.isDestroyed()) {
+        var bgUrl = d.url;
+        mainWindow.webContents.executeJavaScript(
+          'document.body.style.backgroundImage="url(' + JSON.stringify(bgUrl) + ')"; document.body.style.backgroundSize="cover";'
+        ).catch(function(){});
+        log('[Command] set_wallpaper');
+      }
+      return true;
+
+    case 'command_set_theme':
+      // Set HA theme via WebSocket
+      if (d.theme && haWs && haWs.readyState === 1) {
+        haWs.send(JSON.stringify({
+          id: ++wsMsgId, type: 'call_service',
+          domain: 'frontend', service: 'set_theme',
+          service_data: { name: d.theme }
+        }));
+        log('[Command] set_theme=' + d.theme);
+      }
+      return true;
+
+    default:
+      // Check if message starts with 'command_' — if so, log unknown but don't show toast
+      if (cmd.startsWith('command_')) {
+        log('[Command] Unknown command: ' + cmd);
+        return true; // consume it anyway
+      }
+      return false; // not a command, show as regular notification
+  }
+}
 
 function showNotification(title, message, options = {}) {
   // Channel filtering
