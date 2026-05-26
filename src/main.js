@@ -400,6 +400,17 @@ function loadDashboard() {
           log('[Overlay] Error injecting: ' + e.message);
         }
 
+        // Inject toast notification overlay
+        try {
+          const toastCss = fs.readFileSync(path.join(__dirname, 'views', 'toast.css'), 'utf8');
+          let toastJs = fs.readFileSync(path.join(__dirname, 'views', 'toast.js'), 'utf8');
+          toastJs = toastJs.replace('{{TOAST_CSS}}', JSON.stringify(toastCss).slice(1, -1));
+          mainWindow.webContents.executeJavaScript(toastJs);
+          log('[Toast] Overlay injected');
+        } catch (e) {
+          log('[Toast] Error injecting: ' + e.message);
+        }
+
         if (haClient) startSensorUpdates();
         connectNotifications();
       });
@@ -467,7 +478,12 @@ function startPushServer() {
         const title = data.title || 'Home Assistant';
         const message = data.message || '';
         log('[PushNotify] Received: ' + title + ': ' + message);
-        showNotification(title, message);
+        showNotification(title, message, {
+          priority: data.priority || 'default',
+          sound: data.push_sound || 'default',
+          icon: data.icon,
+          actions: data.actions,
+        });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
@@ -550,7 +566,12 @@ function connectNotifications() {
 
         // Mobile app push notification from HA (standard push channel)
         if (ev.message !== undefined || ev.title !== undefined) {
-          showNotification(ev.title || 'Home Assistant', ev.message || '');
+          showNotification(ev.title || 'Home Assistant', ev.message || '', {
+            priority: ev.data?.priority || 'default',
+            sound: ev.data?.push_sound || 'default',
+            icon: ev.data?.icon,
+            actions: ev.data?.actions,
+          });
           // Confirm receipt
           if (ev.hass_confirm_id) {
             haWs.send(JSON.stringify({
@@ -730,58 +751,31 @@ const SOUND_GENERATORS = {
 };
 
 function showNotification(title, message, options = {}) {
-  const theme = NOTIFICATION_THEMES[options.theme] || NOTIFICATION_THEMES.default;
-  const soundName = options.sound || theme.sound;
-  const duration = options.duration || 6000;
-  log('[Notify] ' + title + ': ' + message + (options.theme ? ' [' + options.theme + ']' : ''));
+  const priority = options.priority || 'default';
+  const soundName = options.sound || 'default';
+  log('[Notify] ' + title + ': ' + message + ' [' + priority + ']');
   addToHistory(title, message);
 
-  try {
-    const { width: sw } = screen.getPrimaryDisplay().workAreaSize;
-    const pw = 340, ph = 110;
-    const px = sw - pw - 16, py = 40;
-    const accent = theme.accent;
-    const icon = options.icon || theme.icon;
-    const soundGen = SOUND_GENERATORS[soundName] || SOUND_GENERATORS.default;
-    const safeTitle = title.replace(/</g, '&lt;').replace(/"/g, '&quot;');
-    const safeMsg = message.replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  // Play sound via system audio
+  playNotificationSound(soundName);
 
-    const nw = new BrowserWindow({
-      x: px, y: py, width: pw, height: ph,
-      frame: false, transparent: true, resizable: false,
-      alwaysOnTop: true, skipTaskbar: true, focusable: false,
-      show: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true },
-    });
-    nw.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
-`<!DOCTYPE html><html><head><style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:transparent;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
-.c{background:rgba(28,28,30,0.96);color:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;animation:in .35s cubic-bezier(.16,1,.3,1);cursor:pointer}
-.a{height:3px;background:${accent}}
-.b{padding:14px 18px 10px;display:flex;align-items:flex-start;gap:10px}
-.i{font-size:20px;flex-shrink:0}
-.t{font-weight:600;font-size:13.5px;line-height:1.3;margin-bottom:2px}
-.m{color:#ababab;font-size:12.5px;line-height:1.4;word-break:break-word}
-.p{height:3px;background:${accent};margin-top:8px;transform-origin:left;animation:pr ${duration}ms linear forwards}
-@keyframes in{from{opacity:0;transform:translateX(50px)}to{opacity:1;transform:translateX(0)}}
-@keyframes out{from{opacity:1}to{opacity:0;transform:translateX(50px)}}
-</style></head><body>
-<div class="c" id="c">
-<div class="a"></div>
-<div class="b"><span class="i">${icon}</span><div><div class="t">${safeTitle}</div><div class="m">${safeMsg}</div></div></div>
-
-</div>
-<script>
-try{var ctx=new(window.AudioContext||window.webkitAudioContext)();(${soundGen})(ctx)}catch(e){}
-document.getElementById('c').onclick=function(){document.getElementById('c').style.animation='out .25s ease forwards';setTimeout(function(){window.close()},260)}
-<\/script></body></html>`));
-    nw.showInactive();
-
-    // Also play sound via system audio as fallback (in case Web Audio fails in Electron)
-    playNotificationSound(soundName);
-  } catch(e) {
-    log('[Notify] Error: ' + e.message);
+  // Send toast to overlay in main window
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.executeJavaScript(
+        `window.__haToast?.show(${JSON.stringify({
+          title,
+          message,
+          priority,
+          icon: options.icon,
+          sound: false, // already played via system
+          duration: options.duration,
+          actions: options.actions,
+        })})`
+      );
+    } catch (e) {
+      log('[Notify] Toast inject error: ' + e.message);
+    }
   }
 }
 
