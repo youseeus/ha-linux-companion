@@ -5,10 +5,7 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    #ha-comp-clock { position:fixed;top:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.6);color:#fff;font-size:13px;font-family:-apple-system,sans-serif;padding:4px 12px;border-radius:8px;backdrop-filter:blur(8px);cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px; }
-    #ha-comp-clock .clock-time { font-size:16px;font-weight:600; }
-    #ha-comp-clock .clock-date { font-size:11px;color:#ABABAB; }
-    #ha-comp-clock .clock-temp { font-size:11px;color:#FF9500; }
+    /* clock styles inside panel */
     #ha-comp-toggle { position:fixed;top:12px;right:12px;z-index:99999;width:44px;height:44px;border-radius:22px;background:rgba(30,30,30,0.85);border:1px solid #555;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);transition:all 0.2s;box-shadow:0 2px 8px rgba(0,0,0,0.3); }
     #ha-comp-toggle:hover { background:rgba(60,60,60,0.95);transform:scale(1.1); }
     #ha-comp-panel { position:fixed;top:0;right:-380px;z-index:99998;width:360px;height:100vh;background:rgba(28,28,30,0.97);backdrop-filter:blur(20px);border-left:1px solid #3A3A3C;color:#fff;transition:right 0.3s ease;overflow-y:auto;font-family:-apple-system,sans-serif;padding:20px 16px;box-sizing:border-box; }
@@ -55,42 +52,21 @@
   `;
   document.head.appendChild(style);
 
-  // System Clock
-  const clock = document.createElement('div');
-  clock.id = 'ha-comp-clock';
-  clock.innerHTML = '<span class="clock-time">--:--</span><span class="clock-date">--</span>';
-  document.body.appendChild(clock);
-
+  // Clock — updated inside panel header
   const dayNames = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
   const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
-  let clockTempEl = null;
+  var clockEl = null;
 
   function updateClock() {
+    if (!clockEl) return;
     const now = new Date();
     const hh = now.getHours().toString().padStart(2,'0');
     const mm = now.getMinutes().toString().padStart(2,'0');
     const ss = now.getSeconds().toString().padStart(2,'0');
-    clock.querySelector('.clock-time').textContent = hh + ':' + mm + ':' + ss;
-    clock.querySelector('.clock-date').textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
+    clockEl.querySelector('.clock-time').textContent = hh + ':' + mm + ':' + ss;
+    clockEl.querySelector('.clock-date').textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
   }
-  updateClock();
   setInterval(updateClock, 1000);
-
-  // Temperature in clock (updated periodically)
-  function updateClockTemp() {
-    ipc('getHardwareInfo').then(function(hw) {
-      if (hw && hw.cpuTempC) {
-        if (!clockTempEl) {
-          clockTempEl = document.createElement('span');
-          clockTempEl.className = 'clock-temp';
-          clock.appendChild(clockTempEl);
-        }
-        clockTempEl.textContent = hw.cpuTempC + '°C';
-      }
-    });
-  }
-  setInterval(updateClockTemp, 30000);
-  setTimeout(updateClockTemp, 2000);
 
   // Toggle button
   const toggle = document.createElement('button');
@@ -104,6 +80,11 @@
   panel.id = 'ha-comp-panel';
   panel.innerHTML = `
     <div class="comp-header"><span class="comp-header-title">HA Linux Companion</span><button class="comp-close-panel" id="comp-close">✕</button></div>
+    <div style="display:flex;align-items:center;gap:12px;padding:8px 0;margin-bottom:4px;border-bottom:1px solid #2C2C2E" id="comp-clock-bar">
+      <span style="font-size:22px;font-weight:700" class="clock-time">--:--</span>
+      <span style="font-size:12px;color:#ABABAB" class="clock-date">--</span>
+      <span style="font-size:12px;color:#FF9500" class="clock-temp"></span>
+    </div>
     <div class="comp-version" id="comp-version">v1.0.0</div>
 
     <h3>🖥️ Display</h3>
@@ -446,6 +427,20 @@
   }
   function loadAndRenderChannels() { ipc('getChannels').then(renderChannels); }
   window.__haChannels = { refresh: loadAndRenderChannels };
+
+  // Clock element reference
+  clockEl = document.getElementById('comp-clock-bar');
+  updateClock();
+
+  // Clock temp
+  function updateClockTemp() {
+    if (!clockEl) return;
+    ipc('getHardwareInfo').then(function(hw) {
+      if (hw && hw.cpuTempC) clockEl.querySelector('.clock-temp').textContent = hw.cpuTempC + '°C';
+    });
+  }
+  setInterval(updateClockTemp, 30000);
+  setTimeout(updateClockTemp, 2000);
 
   // ── Init ──
   ipc('getSystemInfo').then(info => {
