@@ -3,6 +3,8 @@
   "version": "2.3.0-dev",
   "description": "Home Assistant Companion for Linux — Professional desktop application",
   "main": "src/main.js",
+  "author": "Simone Bonizzardi <simone.bonizzardi5@gmail.com>",
+  "homepage": "https://github.com/SimoneB79/ha-linux-companion",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --linux",
