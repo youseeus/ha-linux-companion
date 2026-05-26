@@ -12,6 +12,7 @@ const http = require('http');
 const os = require('os');
 const crypto = require('crypto');
 const si = require('systeminformation');
+const auth = require('./auth');
 
 // ── Config ──
 const CONFIG_DIR = path.join(os.homedir(), '.config', 'ha-linux-companion');
@@ -23,27 +24,9 @@ let tray = null;
 let sensorInterval = null;
 let config = null;
 
-// ── Config Management ──
-function ensureConfigDir() {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-}
-
-function loadConfig() {
-  ensureConfigDir();
-  if (fs.existsSync(CONFIG_FILE)) {
-    try {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    } catch { return {}; }
-  }
-  return {};
-}
-
-function saveConfig(data) {
-  ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2));
-}
+// Use auth module for config management
+function loadConfig() { return auth.loadConfig(); }
+function saveConfig(data) { return auth.saveConfig(data); }
 
 // ── HA API Client ──
 class HAClient {
@@ -98,61 +81,6 @@ class HAClient {
       }
       req.end();
     });
-  }
-
-  // ── Auth Flow: Username + Password (+ optional 2FA) ──
-  async initiateAuth() {
-    // Step 1: Start auth flow
-    const res = await this.request('POST', '/auth/login_flow', {
-      client_id: `${this.baseUrl}/`,
-      handler: ['homeassistant', null],
-      redirect_uri: `${this.baseUrl}/?auth_callback=1`,
-    });
-    return res;
-  }
-
-  async submitPassword(flowId, username, password) {
-    const res = await this.request('POST', `/auth/login_flow/${flowId}`, {
-      client_id: `${this.baseUrl}/`,
-      username: username,
-      password: password,
-    });
-    return res;
-  }
-
-  async submitMfaCode(flowId, mfaCode) {
-    const res = await this.request('POST', `/auth/login_flow/${flowId}`, {
-      client_id: `${this.baseUrl}/`,
-      user_code: mfaCode,
-    });
-    return res;
-  }
-
-  async exchangeCodeForToken(code) {
-    const res = await this.request('POST', '/auth/token',
-      `grant_type=authorization_code&code=${encodeURIComponent(code)}&client_id=${encodeURIComponent(this.baseUrl + '/')}`,
-      { 'Content-Type': 'application/x-www-form-urlencoded' }
-    );
-    return res;
-  }
-
-  // Refresh the access token using a stored refresh token
-  async refreshAccessToken(refreshToken) {
-    try {
-      const res = await this.request('POST', '/auth/token',
-        `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(this.baseUrl + '/')}`,
-        { 'Content-Type': 'application/x-www-form-urlencoded' }
-      );
-      if (res.status === 200 && res.data.access_token) {
-        log('[AUTH] Token refreshed successfully');
-        this.token = res.data.access_token;
-        return { token: res.data.access_token, refresh_token: res.data.refresh_token || refreshToken, expires_in: res.data.expires_in };
-      }
-      log('[AUTH] Token refresh failed: ' + res.status);
-    } catch (e) {
-      log('[AUTH] Token refresh error: ' + e.message);
-    }
-    return null;
   }
 
   async registerDevice(deviceName) {
@@ -401,7 +329,8 @@ function createMainWindow() {
 function loadAppView() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  if (config.url && config.token) {
+  const token = auth.getAccessToken();
+  if (config.url && token) {
     // Connected — load HA dashboard
     loadDashboard();
   } else {
@@ -421,6 +350,7 @@ function loadDashboard() {
   if (!config.url) return;
 
   const haUrl = config.url.replace(/\/+$/, '');
+  const token = auth.getAccessToken() || config.token;
   dashboardLoaded = false;
   authInjected = false;
 
@@ -870,10 +800,10 @@ function createTray() {
       { type: 'separator' },
       { label: '⚙️ Settings', click: () => { loadLoginView(); mainWindow.show(); } },
       { label: '❌ Disconnect', click: () => {
-        config = {};
-        saveConfig(config);
-        stopSensorUpdates();
+        auth.logout();
         haClient = null;
+        stopSensorUpdates();
+        config = loadConfig();
         loadLoginView();
         mainWindow.show();
       }},
@@ -894,42 +824,33 @@ ipcMain.handle('get-config', () => config);
 ipcMain.handle('connect', async (event, { url: haUrl, token, deviceName }) => {
   try {
     haUrl = haUrl.replace(/\/+$/, '');
-
-    // Test connection
-    const client = new HAClient(haUrl, token);
-    const test = await client.request('GET', '/api/');
-    if (test.status !== 200) {
-      return { success: false, error: `Connection failed: HTTP ${test.status}` };
+    const result = await auth.loginWithToken(haUrl, token);
+    
+    if (!result.success) {
+      return { success: false, error: result.error || 'Connection failed' };
     }
 
-    // Register device — use long-lived token from registration
+    // Register device
+    const accessToken = auth.getAccessToken();
+    const client = new HAClient(haUrl, accessToken);
     const registered = await client.registerDevice(deviceName || os.hostname());
-    let finalToken = client.token || token;
 
-    // Create a long-lived token for persistent auto-login
-
-    // Save config
-    config = {
-      url: haUrl,
-      token: finalToken,
-      deviceName: deviceName || os.hostname(),
-      deviceId: client.deviceId,
-      webhookId: client.webhookId,
-      registered,
-      fullscreen: true,
-    };
+    config = loadConfig();
+    config.deviceName = deviceName || os.hostname();
+    config.deviceId = client.deviceId;
+    config.webhookId = client.webhookId;
+    config.registered = registered;
+    config.fullscreen = true;
     saveConfig(config);
 
     haClient = client;
 
     if (registered) {
-      console.log('[AUTH] Device registered via token, webhookId:', client.webhookId);
+      log('[AUTH] Device registered via token, webhookId:', client.webhookId);
       startSensorUpdates();
     }
 
-    // Load dashboard
     loadDashboard();
-
     return { success: true, registered };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1071,8 +992,7 @@ ipcMain.handle('setup-audio', async () => {
 
 ipcMain.handle('logout', () => {
   stopSensorUpdates();
-  if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
-  config = {};
+  auth.logout();
   haClient = null;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.removeAllListeners('did-finish-load');
@@ -1088,71 +1008,40 @@ ipcMain.handle('quit', () => {
 ipcMain.handle('login-with-credentials', async (event, { url: haUrl, username, password, deviceName }) => {
   try {
     haUrl = haUrl.replace(/\/+$/, '');
-    const client = new HAClient(haUrl, null);
-
-    // Initiate auth flow
-    const init = await client.initiateAuth();
-    if (init.status !== 200 || !init.data.flow_id) {
-      return { success: false, error: `Auth init failed: ${init.status}` };
-    }
-
-    const flowId = init.data.flow_id;
-
-    // Submit credentials
-    const result = await client.submitPassword(flowId, username, password);
-
-    if (result.status === 200 && result.data.type === 'create_entry') {
-      // Success — extract token
-      const code = result.data.result;
-      const tokenRes = await client.exchangeCodeForToken(code);
-      if (tokenRes.status === 200 && tokenRes.data.access_token) {
-        const token = tokenRes.data.access_token;
-        const refreshToken = tokenRes.data.refresh_token || null;
-        client.token = token;
-
-        // Register device — HA returns a long-lived access token
-        const registered = await client.registerDevice(deviceName || os.hostname());
-
-        let finalToken = client.token || token;
-
-        config = {
-          url: haUrl,
-          token: finalToken,
-          refreshToken,
-          tokenExpires: tokenRes.data.expires_in ? Date.now() + tokenRes.data.expires_in * 1000 : null,
-          deviceName: deviceName || os.hostname(),
-          deviceId: client.deviceId,
-          webhookId: client.webhookId,
-          registered, fullscreen: true,
-        };
-        saveConfig(config);
-        haClient = client;
-
-        if (registered) {
-          console.log('[AUTH] Device registered, webhookId:', client.webhookId);
-          startSensorUpdates();
-        }
-        loadDashboard();
-        return { success: true, registered };
-      }
-      return { success: false, error: 'Token exchange failed' };
-    }
-
+    
+    // Use auth module for credential login
+    const result = await auth.loginWithCredentials(haUrl, username, password);
+    
     // Check if MFA is required
-    if (result.data.errors) {
-      return { success: false, error: result.data.errors.base || result.data.errors.password || 'Invalid credentials' };
-    }
-
-    if (result.data.step && (result.data.step.id === 'mfa' || result.data.type === 'form')) {
+    if (result.mfa_required) {
       return {
         mfa_required: true,
-        flow_id: flowId,
-        flow_type: result.data.step?.type || 'totp',
-        providers: result.data.step?.data || [],
+        flow_id: result.flow_id,
+        hass_url: result.hass_url,
       };
     }
+    
+    // Register device
+    const accessToken = auth.getAccessToken();
+    const client = new HAClient(haUrl, accessToken);
+    const registered = await client.registerDevice(deviceName || os.hostname());
 
-    return { success: false, error: `Unexpected response: ${result.status}` };
+    config = loadConfig();
+    config.deviceName = deviceName || os.hostname();
+    config.deviceId = client.deviceId;
+    config.webhookId = client.webhookId;
+    config.registered = registered;
+    config.fullscreen = true;
+    saveConfig(config);
+
+    haClient = client;
+
+    if (registered) {
+      log('[AUTH] Device registered, webhookId:', client.webhookId);
+      startSensorUpdates();
+    }
+    loadDashboard();
+    return { success: true, registered };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1161,39 +1050,24 @@ ipcMain.handle('login-with-credentials', async (event, { url: haUrl, username, p
 // ── Submit 2FA code ──
 ipcMain.handle('submit-mfa', async (event, { url: haUrl, flowId, mfaCode }) => {
   try {
-    const client = new HAClient(haUrl.replace(/\/+$/, ''), null);
-    const result = await client.submitMfaCode(flowId, mfaCode);
+    const result = await auth.submitMfa(haUrl, flowId, mfaCode);
+    
+    // Register device
+    const accessToken = auth.getAccessToken();
+    const client = new HAClient(haUrl.replace(/\/+$/, ''), accessToken);
+    const registered = await client.registerDevice(os.hostname());
 
-    if (result.status === 200 && result.data.type === 'create_entry') {
-      const code = result.data.result;
-      const tokenRes = await client.exchangeCodeForToken(code);
-      if (tokenRes.status === 200 && tokenRes.data.access_token) {
-        const token = tokenRes.data.access_token;
-        const refreshToken = tokenRes.data.refresh_token || null;
-        client.token = token;
-        const registered = await client.registerDevice(os.hostname());
-        let finalToken = client.token || token;
+    config = loadConfig();
+    config.deviceName = os.hostname();
+    config.deviceId = client.deviceId;
+    config.webhookId = client.webhookId;
+    config.registered = registered;
+    config.fullscreen = true;
+    saveConfig(config);
 
-        config = {
-          url: haUrl.replace(/\/+$/, ''), token: finalToken,
-          refreshToken,
-          tokenExpires: tokenRes.data.expires_in ? Date.now() + tokenRes.data.expires_in * 1000 : null,
-          deviceName: os.hostname(),
-          deviceId: client.deviceId, webhookId: client.webhookId,
-          registered, fullscreen: true,
-        };
-        saveConfig(config);
-        haClient = client;
-        loadDashboard();
-        return { success: true, registered };
-      }
-      return { success: false, error: 'Token exchange failed' };
-    }
-
-    if (result.data.errors) {
-      return { success: false, error: result.data.errors.code || 'Invalid code' };
-    }
-    return { success: false, error: `Unexpected: ${result.status}` };
+    haClient = client;
+    loadDashboard();
+    return { success: true, registered };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1206,36 +1080,32 @@ ipcMain.on('quit', () => app.quit());
 app.whenReady().then(async () => {
   config = loadConfig();
 
+  // Wire auth module logger
+  auth.setLogger(log);
+
   // Detect audio backend for notification sounds
   detectAudioBackend();
 
   // Start push notification server first (needed before device registration)
   startPushServer();
 
-  // Restore HA client if already configured
-  if (config.url && config.token) {
-    // Check if token is expired and refresh if possible
-    if (config.tokenExpires && Date.now() > config.tokenExpires && config.refreshToken) {
-      log('[AUTH] Token expired, refreshing...');
-      const tempClient = new HAClient(config.url, config.token);
-      const refreshed = await tempClient.refreshAccessToken(config.refreshToken);
-      if (refreshed) {
-        config.token = refreshed.token;
-        if (refreshed.refresh_token) config.refreshToken = refreshed.refresh_token;
-        config.tokenExpires = refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : null;
-        saveConfig(config);
-        log('[AUTH] Token refreshed and saved');
-      } else {
-        log('[AUTH] Token refresh failed, will re-login');
-        config = {};
-        saveConfig(config);
-      }
-    }
-
-    if (config.url && config.token) {
-      haClient = new HAClient(config.url, config.token);
+  // Restore HA session using auth module
+  // This handles token refresh automatically and NEVER wipes config
+  if (config.url) {
+    log('[AUTH] Attempting to restore session...');
+    const authResult = await auth.initFromSavedSession();
+    
+    if (authResult && auth.getAccessToken()) {
+      // Session restored successfully
+      const token = auth.getAccessToken();
+      haClient = new HAClient(config.url, token);
       if (config.deviceId) haClient.deviceId = config.deviceId;
       if (config.webhookId) haClient.webhookId = config.webhookId;
+
+      // Reload config in case auth module updated tokens
+      config = loadConfig();
+      
+      log('[AUTH] Session restored, token active');
 
       // Wait for push server to be ready, then update push_url
       const waitForPushServer = setInterval(() => {
@@ -1246,6 +1116,9 @@ app.whenReady().then(async () => {
         }
       }, 500);
       setTimeout(() => clearInterval(waitForPushServer), 10000);
+    } else {
+      log('[AUTH] Could not restore session, login required');
+      // Don't wipe config — keep the URL and device info for next login
     }
   }
 
@@ -1260,6 +1133,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopSensorUpdates();
   stopPushServer();
+  auth.cleanup();
 });
 
 // Prevent certificate errors for self-signed certs
