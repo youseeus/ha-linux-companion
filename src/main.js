@@ -692,8 +692,47 @@ const SOUND_PRESETS = {
 };
 
 // Play notification sound via system audio (fallback from Web Audio)
+function playCustomSound(filePath) {
+  if (audioBackend === 'none' || !fs.existsSync(filePath)) return false;
+  try {
+    let cmd = null;
+    if (audioBackend === 'pipewire') {
+      cmd = `XDG_RUNTIME_DIR=/run/user/$(id -u) pw-play "${filePath}" 2>/dev/null || paplay "${filePath}" 2>/dev/null`;
+    } else if (audioBackend === 'pulseaudio') {
+      cmd = `paplay "${filePath}" 2>/dev/null`;
+    } else {
+      cmd = `aplay -D default "${filePath}" 2>/dev/null || aplay "${filePath}" 2>/dev/null`;
+    }
+    require('child_process').exec(cmd, { timeout: 5000 });
+    log('[Audio] Custom sound: ' + path.basename(filePath));
+    return true;
+  } catch (e) {
+    log('[Audio] Custom sound error: ' + e.message);
+    return false;
+  }
+}
+
+function listCustomSounds() {
+  const soundsDir = path.join(CONFIG_DIR, 'sounds');
+  try {
+    if (!fs.existsSync(soundsDir)) fs.mkdirSync(soundsDir, { recursive: true });
+    return fs.readdirSync(soundsDir)
+      .filter(f => /\.(wav|ogg|mp3|flac)$/i.test(f))
+      .map(f => ({ name: f.replace(/\.[^.]+$/, ''), file: f }));
+  } catch (e) {
+    return [];
+  }
+}
+
 function playNotificationSound(soundName) {
   if (audioBackend === 'none') return;
+  // Check if it's a custom sound file
+  if (soundName && soundName.startsWith('custom:')) {
+    const fileName = soundName.slice(7);
+    const filePath = path.join(CONFIG_DIR, 'sounds', fileName);
+    playCustomSound(filePath);
+    return;
+  }
   try {
     const preset = SOUND_PRESETS[soundName] || SOUND_PRESETS.default;
     // Generate a combined WAV
@@ -886,6 +925,8 @@ ipcMain.handle('play-notification-sound', (event, sound) => {
   playNotificationSound(sound || 'default');
   return true;
 });
+
+ipcMain.handle('list-custom-sounds', () => listCustomSounds());
 
 function addToHistory(title, message) {
   notifHistory.unshift({ title, message, time: new Date().toISOString() });

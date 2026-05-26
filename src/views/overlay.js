@@ -68,6 +68,10 @@
     <div class=\"comp-notif-row\"><div class=\"comp-label\">🌙 Non disturbare</div><button class=\"comp-toggle\" id=\"comp-notif-dnd\"></button></div>
     <div class=\"comp-notif-row\"><div class=\"comp-label\">Durata popup</div><select class=\"comp-select\" id=\"comp-notif-duration\"><option value=\"4000\">4 sec</option><option value=\"6000\" selected>6 sec</option><option value=\"10000\">10 sec</option><option value=\"0\">Mai</option></select></div>
     <div class=\"comp-notif-row\"><div class=\"comp-label\">Melodia</div><select class=\"comp-select\" id=\"comp-notif-melody\"><option value=\"default\">Default</option><option value=\"success\">Success</option><option value=\"warning\">Warning</option><option value=\"error\">Error</option></select></div>
+    <div id=\"comp-custom-sounds\" style=\"display:none\">
+      <div class=\"comp-notif-row\"><div class=\"comp-label\">🎵 Suono personalizzato</div><select class=\"comp-select\" id=\"comp-notif-custom\"><option value=\"\">-- seleziona --</option></select></div>
+      <div class=\"comp-section-desc\">Formati: .wav, .ogg, .mp3, .flac — metti i file in<br><code style=\"color:#64D2FF;font-size:10px\">~/.config/ha-linux-companion/sounds/</code></div>
+    </div>
     <div class=\"comp-section-desc\">Ultime notifiche</div>
     <div class=\"comp-row\"><div class=\"comp-label\" id=\"comp-notif-count\">Nessuna notifica</div><button class=\"comp-btn secondary\" id=\"comp-notif-clear\">Cancella</button></div>
     <div id=\"comp-notif-list\" style=\"max-height:200px;overflow-y:auto;\"></div>
@@ -179,6 +183,55 @@
   notifMelody.addEventListener('change', function() {
     notifSettings.melody = notifMelody.value; saveNotifSettings();
     ipc('playNotificationSound', notifMelody.value);
+  });
+
+  // Custom sounds
+  var customSection = document.getElementById('comp-custom-sounds');
+  var customSelect = document.getElementById('comp-notif-custom');
+
+  // Add 'Custom' option to melody dropdown
+  var customOpt = document.createElement('option');
+  customOpt.value = '__custom__';
+  customOpt.textContent = '🎵 Personalizzata';
+  notifMelody.appendChild(customOpt);
+
+  // If saved melody is custom, show section
+  if (notifSettings.melody && notifSettings.melody.startsWith('custom:')) {
+    notifMelody.value = '__custom__';
+    customSection.style.display = 'block';
+  }
+
+  notifMelody.addEventListener('change', function() {
+    if (notifMelody.value === '__custom__') {
+      customSection.style.display = 'block';
+      // Load custom sounds
+      ipc('listCustomSounds').then(function(sounds) {
+        customSelect.innerHTML = '<option value="">-- seleziona --</option>';
+        if (sounds && sounds.length) {
+          sounds.forEach(function(s) {
+            var opt = document.createElement('option');
+            opt.value = 'custom:' + s.file;
+            opt.textContent = s.name;
+            customSelect.appendChild(opt);
+          });
+          // Restore saved
+          if (notifSettings.melody) customSelect.value = notifSettings.melody;
+        } else {
+          customSelect.innerHTML = '<option value="">Nessun file trovato</option>';
+        }
+      });
+    } else {
+      customSection.style.display = 'none';
+      notifSettings.customSound = null;
+    }
+  });
+
+  customSelect.addEventListener('change', function() {
+    if (customSelect.value) {
+      notifSettings.melody = customSelect.value;
+      saveNotifSettings();
+      ipc('playNotificationSound', customSelect.value);
+    }
   });
 
   ipc('getSystemInfo').then(info => {

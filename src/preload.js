@@ -23,4 +23,5 @@ contextBridge.exposeInMainWorld('haCompanion', {
   getVersion: () => ipcRenderer.invoke('get-version'),
   getNotificationHistory: () => ipcRenderer.invoke('get-notification-history'),
   playNotificationSound: (sound) => ipcRenderer.invoke('play-notification-sound', sound),
+  listCustomSounds: () => ipcRenderer.invoke('list-custom-sounds'),
 });
