@@ -6,17 +6,17 @@
   const style = document.createElement('style');
   style.textContent = `
     /* ── Kiosk Status Bar ── */
-    #ha-comp-topbar { position:fixed;top:0;left:0;right:0;height:32px;z-index:99999;display:flex;align-items:center;justify-content:space-between;padding:0 12px;background:rgba(18,18,20,0.88);backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,0.06);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:rgba(255,255,255,0.85);font-size:12px;transition:opacity 0.4s,transform 0.4s; }
+    #ha-comp-topbar { position:fixed;top:0;left:0;right:0;height:50px;z-index:99999;display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:rgba(18,18,20,0.88);backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,0.06);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:rgba(255,255,255,0.85);font-size:14px;transition:opacity 0.4s,transform 0.4s; }
     #ha-comp-topbar.hidden { opacity:0;transform:translateY(-100%);pointer-events:none; }
     #ha-comp-topbar:hover, #ha-comp-topbar.reveal { opacity:1;transform:translateY(0);pointer-events:auto; }
     .topbar-left { display:flex;align-items:center;gap:14px; }
-    .topbar-time { font-size:13px;font-weight:600;letter-spacing:0.3px;font-variant-numeric:tabular-nums; }
-    .topbar-date { font-size:11px;color:rgba(255,255,255,0.5); }
-    .topbar-temp { font-size:11px;display:flex;align-items:center;gap:3px; }
+    .topbar-time { font-size:16px;font-weight:600;letter-spacing:0.3px;font-variant-numeric:tabular-nums; }
+    .topbar-date { font-size:12px;color:rgba(255,255,255,0.5); }
+    .topbar-temp { font-size:12px;display:flex;align-items:center;gap:3px; }
     .topbar-temp .dot { width:6px;height:6px;border-radius:50%;display:inline-block; }
     .topbar-right { display:flex;align-items:center;gap:10px; }
     .topbar-device { font-size:10px;color:rgba(255,255,255,0.35);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-    #ha-comp-topbar-btn { width:28px;height:28px;border-radius:6px;border:none;background:transparent;color:rgba(255,255,255,0.55);font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s; }
+    #ha-comp-topbar-btn { width:40px;height:40px;border-radius:8px;border:none;background:transparent;color:rgba(255,255,255,0.55);font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s; }
     #ha-comp-topbar-btn:hover { background:rgba(255,255,255,0.1);color:#fff; }
     #ha-comp-topbar-btn:active { background:rgba(255,255,255,0.15);transform:scale(0.92); }
     /* panel offset for topbar */
