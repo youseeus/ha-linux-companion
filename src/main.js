@@ -630,6 +630,101 @@ function connectNotifications() {
   });
 }
 
+// ── HA Connection Monitor ──
+// When HA restarts, the companion loses WebSocket and gets an error page.
+// This monitor pings HA periodically when disconnected and auto-reloads when back.
+let haConnected = true;
+let healthCheckInterval = null;
+const HEALTH_CHECK_INTERVAL = 10000; // 10s when disconnected
+const HEALTH_CHECK_OK_INTERVAL = 60000; // 60s when connected
+
+function haIsReachable() {
+  return new Promise((resolve) => {
+    if (!config || !config.url) { resolve(false); return; }
+    const parsed = new URL(config.url.replace(/\/+$/, ''));
+    const isHttps = parsed.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const req = lib.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: '/api/',
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + (auth.getAccessToken() || config.token || '') },
+      rejectUnauthorized: false,
+      timeout: 5000,
+    }, (res) => {
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+function startHealthCheck() {
+  if (healthCheckInterval) clearInterval(healthCheckInterval);
+  healthCheckInterval = setInterval(healthCheckTick, haConnected ? HEALTH_CHECK_OK_INTERVAL : HEALTH_CHECK_INTERVAL);
+  log('[Health] Monitor started (interval: ' + (haConnected ? '60s' : '10s') + ')');
+}
+
+async function healthCheckTick() {
+  const reachable = await haIsReachable();
+  if (reachable && !haConnected) {
+    log('[Health] HA is back online, reconnecting...');
+    haConnected = true;
+    
+    // Refresh token if needed
+    try {
+      const inst = auth.getAuthInstance();
+      if (inst && typeof inst.refreshAccessToken === 'function') {
+        const cfg = loadConfig();
+        const expires = cfg.tokenExpires || 0;
+        if (expires && Date.now() > expires - 60000) {
+          await inst.refreshAccessToken();
+          config = loadConfig();
+          log('[Health] Token refreshed after HA restart');
+        }
+      }
+    } catch (e) {
+      log('[Health] Token refresh failed: ' + e.message);
+    }
+    
+    // Re-create HA client with fresh token
+    const token = auth.getAccessToken() || config.token;
+    if (token && config.url) {
+      haClient = new HAClient(config.url, token);
+      if (config.deviceId) haClient.deviceId = config.deviceId;
+      if (config.webhookId) haClient.webhookId = config.webhookId;
+      startSensorUpdates();
+    }
+    
+    // Reload dashboard in Electron
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      loadDashboard();
+    }
+    
+    // Reconnect WebSocket notifications
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    connectNotifications();
+    
+    // Switch to slow health check
+    clearInterval(healthCheckInterval);
+    healthCheckInterval = setInterval(healthCheckTick, HEALTH_CHECK_OK_INTERVAL);
+    
+  } else if (!reachable && haConnected) {
+    log('[Health] HA went offline');
+    haConnected = false;
+    stopSensorUpdates();
+    // Switch to fast health check
+    clearInterval(healthCheckInterval);
+    healthCheckInterval = setInterval(healthCheckTick, HEALTH_CHECK_INTERVAL);
+  }
+}
+
+function stopHealthCheck() {
+  if (healthCheckInterval) { clearInterval(healthCheckInterval); healthCheckInterval = null; }
+}
+
 // ── Notification System ──
 // Complete notification system with audio, themes, and rich content.
 // Falls back gracefully when system notification daemon is unavailable.
@@ -1604,6 +1699,9 @@ app.whenReady().then(async () => {
         }
       }, 500);
       setTimeout(() => clearInterval(waitForPushServer), 10000);
+      
+      // Start HA connection health monitor
+      startHealthCheck();
     } else {
       log('[AUTH] Could not restore session, login required');
       // Don't wipe config — keep the URL and device info for next login
@@ -1620,6 +1718,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopSensorUpdates();
+  stopHealthCheck();
   stopPushServer();
   auth.cleanup();
 });
