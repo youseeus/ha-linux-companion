@@ -5,9 +5,21 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    /* clock styles inside panel */
-    #ha-comp-toggle { position:fixed;top:12px;right:12px;z-index:99999;width:44px;height:44px;border-radius:22px;background:rgba(30,30,30,0.85);border:1px solid #555;color:#fff;font-size:22px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);transition:all 0.2s;box-shadow:0 2px 8px rgba(0,0,0,0.3); }
-    #ha-comp-toggle:hover { background:rgba(60,60,60,0.95);transform:scale(1.1); }
+    /* ── Kiosk Status Bar ── */
+    #ha-comp-topbar { position:fixed;top:0;left:0;right:0;height:32px;z-index:99999;display:flex;align-items:center;justify-content:space-between;padding:0 12px;background:rgba(18,18,20,0.88);backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,0.06);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:rgba(255,255,255,0.85);font-size:12px;transition:opacity 0.4s,transform 0.4s; }
+    #ha-comp-topbar.hidden { opacity:0;transform:translateY(-100%);pointer-events:none; }
+    #ha-comp-topbar:hover, #ha-comp-topbar.reveal { opacity:1;transform:translateY(0);pointer-events:auto; }
+    .topbar-left { display:flex;align-items:center;gap:14px; }
+    .topbar-time { font-size:13px;font-weight:600;letter-spacing:0.3px;font-variant-numeric:tabular-nums; }
+    .topbar-date { font-size:11px;color:rgba(255,255,255,0.5); }
+    .topbar-temp { font-size:11px;display:flex;align-items:center;gap:3px; }
+    .topbar-temp .dot { width:6px;height:6px;border-radius:50%;display:inline-block; }
+    .topbar-right { display:flex;align-items:center;gap:10px; }
+    .topbar-device { font-size:10px;color:rgba(255,255,255,0.35);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    #ha-comp-topbar-btn { width:28px;height:28px;border-radius:6px;border:none;background:transparent;color:rgba(255,255,255,0.55);font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s; }
+    #ha-comp-topbar-btn:hover { background:rgba(255,255,255,0.1);color:#fff; }
+    #ha-comp-topbar-btn:active { background:rgba(255,255,255,0.15);transform:scale(0.92); }
+    /* panel offset for topbar */
     #ha-comp-panel { position:fixed;top:0;right:-380px;z-index:99998;width:360px;height:100vh;background:rgba(28,28,30,0.97);backdrop-filter:blur(20px);border-left:1px solid #3A3A3C;color:#fff;transition:right 0.3s ease;overflow-y:auto;font-family:-apple-system,sans-serif;padding:20px 16px;box-sizing:border-box; }
     #ha-comp-panel.open { right:0; }
     #ha-comp-panel h3 { font-size:15px;font-weight:600;color:#8E8E93;text-transform:uppercase;letter-spacing:0.5px;margin:20px 0 10px;padding-top:12px;border-top:1px solid #2C2C2E; }
@@ -52,26 +64,69 @@
   `;
   document.head.appendChild(style);
 
-  // Clock — updated inside panel header
+  // Clock
   const dayNames = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
   const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
-  var clockEl = null;
 
-  function updateClock() {
-    if (!clockEl) return;
+  // ── Kiosk Top Bar ──
+  const topbar = document.createElement('div');
+  topbar.id = 'ha-comp-topbar';
+  topbar.innerHTML = `
+    <div class="topbar-left">
+      <span class="topbar-time" id="topbar-clock">--:--</span>
+      <span class="topbar-date" id="topbar-date">--</span>
+      <span class="topbar-temp" id="topbar-temp"></span>
+    </div>
+    <div class="topbar-right">
+      <span class="topbar-device" id="topbar-device"></span>
+      <button id="ha-comp-topbar-btn" title="Impostazioni">⚙</button>
+    </div>
+  `;
+  document.body.appendChild(topbar);
+
+  // Auto-hide bar after 5s of inactivity, reveal on top-edge touch/mouse
+  let barHideTimer = null;
+  let barPinned = false;
+  function scheduleBarHide() {
+    if (barPinned) return;
+    clearTimeout(barHideTimer);
+    barHideTimer = setTimeout(function() { if (!open) topbar.classList.add('hidden'); }, 5000);
+  }
+  function revealBar() { topbar.classList.remove('hidden'); scheduleBarHide(); }
+  topbar.addEventListener('mouseenter', function() { clearTimeout(barHideTimer); topbar.classList.remove('hidden'); });
+  topbar.addEventListener('mouseleave', function() { scheduleBarHide(); });
+  // Touch: reveal when touching near top 40px
+  document.addEventListener('touchstart', function(e) {
+    if (e.touches[0].clientY < 40) revealBar();
+  }, { passive: true });
+  document.addEventListener('mousemove', function(e) {
+    if (e.clientY < 10) revealBar();
+  });
+  // Pin bar while panel is open
+  // (handled in togglePanel below)
+
+  function updateTopbarClock() {
     const now = new Date();
     const hh = now.getHours().toString().padStart(2,'0');
     const mm = now.getMinutes().toString().padStart(2,'0');
-    const ss = now.getSeconds().toString().padStart(2,'0');
-    clockEl.querySelector('.clock-time').textContent = hh + ':' + mm + ':' + ss;
-    clockEl.querySelector('.clock-date').textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
+    document.getElementById('topbar-clock').textContent = hh + ':' + mm;
+    document.getElementById('topbar-date').textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
   }
-  setInterval(updateClock, 1000);
+  setInterval(updateTopbarClock, 1000);
+  updateTopbarClock();
 
-  // Toggle button
-  const toggle = document.createElement('button');
-  toggle.id = 'ha-comp-toggle'; toggle.innerHTML = '⚙'; toggle.title = 'Settings';
-  document.body.appendChild(toggle);
+  // Update temp in topbar
+  function updateTopbarTemp() {
+    window.haCompanion.getHardwareInfo().then(function(hw) {
+      if (!hw || !hw.cpuTempC) return;
+      var t = parseFloat(hw.cpuTempC);
+      var color = t > 70 ? '#FF3B30' : t > 55 ? '#FF9500' : '#30D158';
+      var el = document.getElementById('topbar-temp');
+      if (el) el.innerHTML = '<span class="dot" style="background:' + color + '"></span>' + hw.cpuTempC + '°C';
+    });
+  }
+  setInterval(updateTopbarTemp, 30000);
+  setTimeout(updateTopbarTemp, 3000);
 
   const backdrop = document.createElement('div');
   backdrop.id = 'comp-backdrop'; document.body.appendChild(backdrop);
@@ -81,9 +136,8 @@
   panel.innerHTML = `
     <div class="comp-header"><span class="comp-header-title">HA Linux Companion</span><button class="comp-close-panel" id="comp-close">✕</button></div>
     <div style="display:flex;align-items:center;gap:12px;padding:8px 0;margin-bottom:4px;border-bottom:1px solid #2C2C2E" id="comp-clock-bar">
-      <span style="font-size:22px;font-weight:700" class="clock-time">--:--</span>
-      <span style="font-size:12px;color:#ABABAB" class="clock-date">--</span>
-      <span style="font-size:12px;color:#FF9500" class="clock-temp"></span>
+      <span style="font-size:18px;font-weight:700" class="clock-time">--:--:--</span>
+      <span style="font-size:11px;color:#ABABAB" class="clock-date">--</span>
     </div>
     <div class="comp-version" id="comp-version">v1.0.0</div>
 
@@ -147,10 +201,28 @@
   document.body.appendChild(panel);
 
   let open = false;
-  function togglePanel() { open = !open; panel.classList.toggle('open', open); backdrop.classList.toggle('open', open); if(open) loadPanelData(); }
-  toggle.addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
+  function togglePanel() {
+    open = !open;
+    panel.classList.toggle('open', open);
+    backdrop.classList.toggle('open', open);
+    barPinned = open;
+    if (open) { topbar.classList.remove('hidden'); clearTimeout(barHideTimer); loadPanelData(); }
+    else { scheduleBarHide(); }
+  }
+  document.getElementById('ha-comp-topbar-btn').addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
   backdrop.addEventListener('click', togglePanel);
   document.getElementById('comp-close').addEventListener('click', togglePanel);
+  // Swipe from right edge to open panel
+  var swipeStartX = 0, swipeActive = false;
+  document.addEventListener('touchstart', function(e) {
+    if (e.touches[0].clientX > window.innerWidth - 20) { swipeStartX = e.touches[0].clientX; swipeActive = true; }
+  }, { passive: true });
+  document.addEventListener('touchmove', function(e) {
+    if (!swipeActive) return;
+    var dx = swipeStartX - e.touches[0].clientX;
+    if (dx > 50 && !open) { togglePanel(); swipeActive = false; }
+  }, { passive: true });
+  document.addEventListener('touchend', function() { swipeActive = false; }, { passive: true });
 
   function ipc(name, data) { return window.haCompanion[name](data); }
 
@@ -428,15 +500,31 @@
   function loadAndRenderChannels() { ipc('getChannels').then(renderChannels); }
   window.__haChannels = { refresh: loadAndRenderChannels };
 
-  // Clock element reference
-  clockEl = document.getElementById('comp-clock-bar');
-  updateClock();
+  // Clock element reference (panel detail clock with seconds)
+  var clockEl = document.getElementById('comp-clock-bar');
+  function updatePanelClock() {
+    if (!clockEl) return;
+    const now = new Date();
+    const hh = now.getHours().toString().padStart(2,'0');
+    const mm = now.getMinutes().toString().padStart(2,'0');
+    const ss = now.getSeconds().toString().padStart(2,'0');
+    var ct = clockEl.querySelector('.clock-time');
+    if (ct) ct.textContent = hh + ':' + mm + ':' + ss;
+    var cd = clockEl.querySelector('.clock-date');
+    if (cd) cd.textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
+  }
+  setInterval(updatePanelClock, 1000);
+  updatePanelClock();
 
-  // Clock temp
+  // Clock temp in panel
   function updateClockTemp() {
     if (!clockEl) return;
     ipc('getHardwareInfo').then(function(hw) {
-      if (hw && hw.cpuTempC) clockEl.querySelector('.clock-temp').textContent = hw.cpuTempC + '°C';
+      if (hw && hw.cpuTempC) {
+        var ct = clockEl.querySelector('.clock-temp');
+        if (!ct) { ct = document.createElement('span'); ct.className = 'clock-temp'; ct.style.cssText = 'font-size:12px;color:#FF9500'; clockEl.appendChild(ct); }
+        ct.textContent = hw.cpuTempC + '°C';
+      }
     });
   }
   setInterval(updateClockTemp, 30000);
@@ -447,7 +535,7 @@
     if (!info) return;
     if (info.volume !== undefined) { volSlider.value = info.volume; volVal.textContent = info.volume + '%'; }
     if (info.brightness !== undefined) { brightSlider.value = info.brightness; brightVal.textContent = info.brightness + '%'; }
-    if (info.deviceName) document.getElementById('comp-device-name').textContent = info.deviceName;
+    if (info.deviceName) { document.getElementById('comp-device-name').textContent = info.deviceName; var td = document.getElementById('topbar-device'); if (td) td.textContent = info.deviceName; }
     if (info.version) document.getElementById('comp-version').textContent = info.version;
     if (info.sensors) document.getElementById('comp-sensor-info').textContent = 'Sensors: ' + info.sensors;
     if (!info.hasBacklight) { var br = document.getElementById('comp-brightness-row'); if(br) br.style.display='none'; }
