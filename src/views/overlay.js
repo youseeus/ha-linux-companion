@@ -3,6 +3,50 @@
   if (window.__haCompanionMenu) return;
   window.__haCompanionMenu = true;
 
+  // ── i18n — Locale data injected by main.js as window.__haLocales ──
+  const LOCALES = window.__haLocales || {};
+
+  const LANG_LABELS = { it: '🇮🇹 Italiano', de: '🇩🇪 Deutsch', en: '🇬🇧 English' };
+
+  function getSavedLang() {
+    return localStorage.getItem('ha_companion_lang') || 'it';
+  }
+  function saveLang(lang) {
+    localStorage.setItem('ha_companion_lang', lang);
+  }
+
+  let currentLang = getSavedLang();
+
+  /**
+   * Translate a key using the current locale (i18next JSON v4 format).
+   * Supports interpolation via {{count}} and plural suffixes _one/_other.
+   *
+   * @param {string} key - translation key
+   * @param {Object} [opts] - optional interpolation values, e.g. { count: 3 }
+   */
+  function t(key, opts) {
+    const locale = LOCALES[currentLang] || LOCALES['it'] || {};
+    let resolvedKey = key;
+
+    // Plural resolution: look for key_one / key_other based on count
+    if (opts && typeof opts.count === 'number') {
+      const pluralKey = opts.count === 1 ? key + '_one' : key + '_other';
+      if (locale[pluralKey] !== undefined) resolvedKey = pluralKey;
+    }
+
+    let value = locale[resolvedKey];
+    if (value === undefined) value = key;
+
+    // Interpolation: replace {{count}}, {{value}}, etc.
+    if (opts && typeof value === 'string') {
+      value = value.replace(/\{\{(\w+)\}\}/g, function(_, varName) {
+        return opts[varName] !== undefined ? opts[varName] : '{{' + varName + '}}';
+      });
+    }
+
+    return value;
+  }
+
   const style = document.createElement('style');
   style.textContent = `
     /* ── Kiosk Status Bar ── */
@@ -64,9 +108,7 @@
   `;
   document.head.appendChild(style);
 
-  // Clock
-  const dayNames = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
-  const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+  // Clock — locale-aware day/month names resolved at render time via t()
 
   // ── Kiosk Top Bar ──
   const topbar = document.createElement('div');
@@ -79,7 +121,7 @@
     </div>
     <div class="topbar-right">
       <span class="topbar-device" id="topbar-device"></span>
-      <button id="ha-comp-topbar-btn" title="Impostazioni">⚙</button>
+      <button id="ha-comp-topbar-btn" title="">⚙</button>
     </div>
   `;
   document.body.appendChild(topbar);
@@ -120,10 +162,11 @@
     const hh = now.getHours().toString().padStart(2,'0');
     const mm = now.getMinutes().toString().padStart(2,'0');
     document.getElementById('topbar-clock').textContent = hh + ':' + mm;
-    document.getElementById('topbar-date').textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
+    document.getElementById('topbar-date').textContent = t('days')[now.getDay()] + ' ' + now.getDate() + ' ' + t('months')[now.getMonth()];
   }
   setInterval(updateTopbarClock, 1000);
   updateTopbarClock();
+  document.getElementById('ha-comp-topbar-btn').title = t('settings');
 
   // Update temp in topbar
   function updateTopbarTemp() {
@@ -143,7 +186,9 @@
 
   const panel = document.createElement('div');
   panel.id = 'ha-comp-panel';
-  panel.innerHTML = `
+
+  function buildPanelHTML() {
+    return `
     <div class="comp-header"><span class="comp-header-title">HA Linux Companion</span><button class="comp-close-panel" id="comp-close">✕</button></div>
     <div style="display:flex;align-items:center;gap:12px;padding:8px 0;margin-bottom:4px;border-bottom:1px solid #2C2C2E" id="comp-clock-bar">
       <span style="font-size:18px;font-weight:700" class="clock-time">--:--:--</span>
@@ -151,56 +196,65 @@
     </div>
     <div class="comp-version" id="comp-version">v1.0.0</div>
 
-    <h3>🖥️ Display</h3>
-    <div class="comp-row" id="comp-brightness-row"><div class="comp-label">Brightness</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-brightness" min="10" max="100" value="100"><span class="comp-val" id="comp-brightness-val">100%</span></div></div>
-    <div class="comp-row"><div class="comp-label">Monitor</div><div style="display:flex;gap:6px"><button class="comp-btn primary" id="comp-display-on" style="padding:6px 12px;font-size:12px">ON</button><button class="comp-btn secondary" id="comp-display-off" style="padding:6px 12px;font-size:12px">OFF</button></div></div>
-    <div class="comp-row"><div class="comp-label">🌙 Schedula notte</div><button class="comp-toggle" id="comp-schedule-enabled"></button></div>
-    <div id="comp-schedule-times" style="display:none;padding:6px 0">
-      <div class="comp-row"><div class="comp-label">Spegni alle</div><input type="time" class="comp-input" id="comp-schedule-off" value="23:00"></div>
-      <div class="comp-row"><div class="comp-label">Accendi alle</div><input type="time" class="comp-input" id="comp-schedule-on" value="07:00"></div>
+    <h3>🌐 ${t('language')}</h3>
+    <div class="comp-row">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${Object.keys(LANG_LABELS).map(lang =>
+          `<button class="comp-btn ${lang === currentLang ? 'primary' : 'secondary'}" data-lang="${lang}" id="lang-btn-${lang}" style="padding:6px 12px;font-size:12px">${LANG_LABELS[lang]}</button>`
+        ).join('')}
+      </div>
     </div>
 
-    <h3>🔊 Audio</h3>
-    <div class="comp-row"><div class="comp-label">Volume</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-volume" min="0" max="100" value="50"><span class="comp-val" id="comp-volume-val">50%</span></div></div>
-    <div class="comp-row"><div class="comp-label">Mute</div><button class="comp-btn secondary" id="comp-mute">Off</button></div>
-    <div class="comp-row"><div class="comp-label">Output</div><select class="comp-select" id="comp-audio-output"></select></div>
+    <h3>${t('sectionDisplay')}</h3>
+    <div class="comp-row" id="comp-brightness-row"><div class="comp-label">${t('brightness')}</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-brightness" min="10" max="100" value="100"><span class="comp-val" id="comp-brightness-val">100%</span></div></div>
+    <div class="comp-row"><div class="comp-label">${t('monitor')}</div><div style="display:flex;gap:6px"><button class="comp-btn primary" id="comp-display-on" style="padding:6px 12px;font-size:12px">ON</button><button class="comp-btn secondary" id="comp-display-off" style="padding:6px 12px;font-size:12px">OFF</button></div></div>
+    <div class="comp-row"><div class="comp-label">${t('nightSchedule')}</div><button class="comp-toggle" id="comp-schedule-enabled"></button></div>
+    <div id="comp-schedule-times" style="display:none;padding:6px 0">
+      <div class="comp-row"><div class="comp-label">${t('turnOffAt')}</div><input type="time" class="comp-input" id="comp-schedule-off" value="23:00"></div>
+      <div class="comp-row"><div class="comp-label">${t('turnOnAt')}</div><input type="time" class="comp-input" id="comp-schedule-on" value="07:00"></div>
+    </div>
 
-    <h3>📶 Network</h3>
+    <h3>${t('sectionAudio')}</h3>
+    <div class="comp-row"><div class="comp-label">${t('volume')}</div><div style="display:flex;align-items:center;gap:8px"><input type="range" class="comp-slider" id="comp-volume" min="0" max="100" value="50"><span class="comp-val" id="comp-volume-val">50%</span></div></div>
+    <div class="comp-row"><div class="comp-label">${t('mute')}</div><button class="comp-btn secondary" id="comp-mute">Off</button></div>
+    <div class="comp-row"><div class="comp-label">${t('output')}</div><select class="comp-select" id="comp-audio-output"></select></div>
+
+    <h3>${t('sectionNetwork')}</h3>
     <div id="comp-network-info" class="comp-info-grid"></div>
 
-    <h3>📶 Bluetooth</h3>
-    <div class="comp-row"><div class="comp-label">Bluetooth</div><button class="comp-btn secondary" id="comp-bt-toggle">Scan</button></div>
+    <h3>${t('sectionBluetooth')}</h3>
+    <div class="comp-row"><div class="comp-label">${t('bluetooth')}</div><button class="comp-btn secondary" id="comp-bt-toggle">Scan</button></div>
     <div id="comp-bt-list"></div>
 
-    <h3>🔧 Hardware</h3>
+    <h3>${t('sectionHardware')}</h3>
     <div id="comp-hw-info" class="comp-info-grid"></div>
-    <div class="comp-row" style="margin-top:8px"><div class="comp-label">CPU Governor</div><select class="comp-select" id="comp-governor"><option value="ondemand">Ondemand</option><option value="performance">Performance</option><option value="powersave">Powersave</option><option value="conservative">Conservative</option><option value="schedutil">Schedutil</option></select></div>
+    <div class="comp-row" style="margin-top:8px"><div class="comp-label">${t('cpuGovernor')}</div><select class="comp-select" id="comp-governor"><option value="ondemand">Ondemand</option><option value="performance">Performance</option><option value="powersave">Powersave</option><option value="conservative">Conservative</option><option value="schedutil">Schedutil</option></select></div>
 
-    <h3>📊 Device</h3>
-    <div class="comp-row"><div><div class="comp-label" id="comp-device-name">Panel</div><div class="comp-sub" id="comp-sensor-info">Sensors: --</div></div></div>
+    <h3>${t('sectionDevice')}</h3>
+    <div class="comp-row"><div><div class="comp-label" id="comp-device-name">Panel</div><div class="comp-sub" id="comp-sensor-info">${t('sensors')}: --</div></div></div>
 
-    <h3>🔔 Notifications</h3>
-    <div class="comp-notif-row"><div class="comp-label">🔔 Notifiche</div><button class="comp-toggle" id="comp-notif-enabled"></button></div>
-    <div class="comp-notif-row"><div class="comp-label">Suono</div><button class="comp-toggle on" id="comp-notif-sound"></button></div>
-    <div class="comp-notif-row"><div class="comp-label">🌙 Non disturbare</div><button class="comp-toggle" id="comp-notif-dnd"></button></div>
-    <div class="comp-notif-row"><div class="comp-label">Durata popup</div><select class="comp-select" id="comp-notif-duration"><option value="4000">4 sec</option><option value="6000" selected>6 sec</option><option value="10000">10 sec</option><option value="0">Mai</option></select></div>
-    <div class="comp-notif-row"><div class="comp-label">Melodia</div><select class="comp-select" id="comp-notif-melody"><option value="default">Default</option><option value="success">Success</option><option value="warning">Warning</option><option value="error">Error</option></select></div>
+    <h3>${t('sectionNotifications')}</h3>
+    <div class="comp-notif-row"><div class="comp-label">${t('notifications')}</div><button class="comp-toggle" id="comp-notif-enabled"></button></div>
+    <div class="comp-notif-row"><div class="comp-label">${t('sound')}</div><button class="comp-toggle on" id="comp-notif-sound"></button></div>
+    <div class="comp-notif-row"><div class="comp-label">${t('doNotDisturb')}</div><button class="comp-toggle" id="comp-notif-dnd"></button></div>
+    <div class="comp-notif-row"><div class="comp-label">${t('popupDuration')}</div><select class="comp-select" id="comp-notif-duration"><option value="4000">4 sec</option><option value="6000" selected>6 sec</option><option value="10000">10 sec</option><option value="0">${t('never')}</option></select></div>
+    <div class="comp-notif-row"><div class="comp-label">${t('melody')}</div><select class="comp-select" id="comp-notif-melody"><option value="default">Default</option><option value="success">Success</option><option value="warning">Warning</option><option value="error">Error</option></select></div>
     <div id="comp-custom-sounds" style="display:none">
-      <div class="comp-notif-row"><div class="comp-label">🎵 Suono personalizzato</div><select class="comp-select" id="comp-notif-custom"><option value="">-- seleziona --</option></select></div>
-      <div class="comp-section-desc">Formati: .wav, .ogg, .mp3, .flac — <code style="color:#64D2FF;font-size:10px">~/.config/ha-linux-companion/sounds/</code></div>
+      <div class="comp-notif-row"><div class="comp-label">${t('customSound')}</div><select class="comp-select" id="comp-notif-custom"><option value="">${t('selectPlaceholder')}</option></select></div>
+      <div class="comp-section-desc">${t('soundFormats')}<code style="color:#64D2FF;font-size:10px">~/.config/ha-linux-companion/sounds/</code></div>
     </div>
-    <div class="comp-section-desc">Ultime notifiche</div>
-    <div class="comp-row"><div class="comp-label" id="comp-notif-count">Nessuna notifica</div><button class="comp-btn secondary" id="comp-notif-clear">Cancella</button></div>
+    <div class="comp-section-desc">${t('latestNotifications')}</div>
+    <div class="comp-row"><div class="comp-label" id="comp-notif-count">${t('noNotifications')}</div><button class="comp-btn secondary" id="comp-notif-clear">${t('clear')}</button></div>
     <div id="comp-notif-list" style="max-height:200px;overflow-y:auto;"></div>
 
-    <h3>📡 Canali</h3>
-    <div class="comp-section-desc" id="comp-channels-desc">I canali si creano automaticamente quando Home Assistant invia una notifica con <code style="color:#64D2FF">data.channel</code>.</div>
+    <h3>${t('sectionChannels')}</h3>
+    <div class="comp-section-desc" id="comp-channels-desc">${t('channelsDesc')}<code style="color:#64D2FF">data.channel</code>.</div>
     <div id="comp-channels-list"></div>
 
-    <h3>🔄 Updates</h3>
+    <h3>${t('sectionUpdates')}</h3>
     <div id="comp-update-info"></div>
 
-    <h3>⚙ Actions</h3>
+    <h3>${t('sectionActions')}</h3>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-refresh">🔄 Reload</button></div>
     <div class="comp-row"><button class="comp-btn secondary" id="comp-fullscreen">⛶ Fullscreen</button></div>
     <div class="comp-row"><button class="comp-btn warning" id="comp-reboot">🔄 Reboot System</button></div>
@@ -208,6 +262,14 @@
     <div class="comp-row"><button class="comp-btn danger" id="comp-logout">Logout</button></div>
     <div class="comp-row"><button class="comp-btn danger" id="comp-quit">✕ Exit App</button></div>
   `;
+  }
+
+  function renderPanel() {
+    panel.innerHTML = buildPanelHTML();
+    bindPanelEvents();
+  }
+
+  renderPanel();
   document.body.appendChild(panel);
 
   let open = false;
@@ -221,7 +283,6 @@
   }
   document.getElementById('ha-comp-topbar-btn').addEventListener('click', function(e) { e.stopImmediatePropagation(); togglePanel(); }, true);
   backdrop.addEventListener('click', togglePanel);
-  document.getElementById('comp-close').addEventListener('click', togglePanel);
   // Swipe from right edge to open panel
   var swipeStartX = 0, swipeActive = false;
   document.addEventListener('touchstart', function(e) {
@@ -248,97 +309,23 @@
     ipc('getGovernor').then(function(g) { document.getElementById('comp-governor').value = g; });
   }
 
-  // ── Display Controls ──
-  document.getElementById('comp-display-on').addEventListener('click', function() { ipc('displayOn'); });
-  document.getElementById('comp-display-off').addEventListener('click', function() { ipc('displayOff'); });
-
-  // ── Schedule ──
-  var schedEnabled = document.getElementById('comp-schedule-enabled');
-  var schedTimes = document.getElementById('comp-schedule-times');
-  var schedOff = document.getElementById('comp-schedule-off');
-  var schedOn = document.getElementById('comp-schedule-on');
-
-  function loadSchedule() {
-    ipc('getSchedule').then(function(s) {
-      if (!s) return;
-      schedEnabled.classList.toggle('on', s.enabled);
-      schedTimes.style.display = s.enabled ? 'block' : 'none';
-      if (s.offTime) schedOff.value = s.offTime;
-      if (s.onTime) schedOn.value = s.onTime;
-    });
-  }
-
-  schedEnabled.addEventListener('click', function() {
-    schedEnabled.classList.toggle('on');
-    var enabled = schedEnabled.classList.contains('on');
-    schedTimes.style.display = enabled ? 'block' : 'none';
-    ipc('setSchedule', { enabled: enabled, offTime: schedOff.value, onTime: schedOn.value });
-  });
-
-  function saveScheduleFromInputs() {
-    ipc('setSchedule', { enabled: schedEnabled.classList.contains('on'), offTime: schedOff.value, onTime: schedOn.value });
-  }
-  schedOff.addEventListener('change', saveScheduleFromInputs);
-  schedOn.addEventListener('change', saveScheduleFromInputs);
-
-  // ── Audio ──
-  var volSlider = document.getElementById('comp-volume'), volVal = document.getElementById('comp-volume-val'), muteBtn = document.getElementById('comp-mute');
-  volSlider.addEventListener('input', async () => { volVal.textContent = volSlider.value + '%'; await ipc('setVolume', parseInt(volSlider.value)); });
-  muteBtn.addEventListener('click', async () => { const m = muteBtn.textContent === 'Off'; muteBtn.textContent = m ? 'On' : 'Off'; muteBtn.style.background = m ? '#FF3B30' : '#3A3A3C'; await ipc('setMute', m); });
-
-  var audioOutputSel = document.getElementById('comp-audio-output');
-  function loadAudioOutputs() {
-    ipc('getAudioOutputs').then(function(outputs) {
-      audioOutputSel.innerHTML = '';
-      if (!outputs || !outputs.length) {
-        audioOutputSel.innerHTML = '<option>Default</option>';
-        return;
-      }
-      outputs.forEach(function(o) {
-        var opt = document.createElement('option');
-        opt.value = o.name;
-        opt.textContent = o.description + (o.isDefault ? ' ✓' : '');
-        if (o.isDefault) opt.selected = true;
-        audioOutputSel.appendChild(opt);
-      });
-    });
-  }
-  audioOutputSel.addEventListener('change', function() { ipc('setAudioOutput', audioOutputSel.value); });
-
   // ── Network Info ──
   function loadNetworkInfo() {
     ipc('getNetworkInfo').then(function(n) {
       var el = document.getElementById('comp-network-info');
-      if (!n) { el.innerHTML = '<div style="color:#636366;font-size:12px">Non disponibile</div>'; return; }
+      if (!n) { el.innerHTML = '<div style="color:#636366;font-size:12px">' + t('notAvailable') + '</div>'; return; }
       var html = '';
       if (n.ssid) {
         html += '<div class="comp-info-item"><div class="comp-info-label">WiFi</div><div class="comp-info-value">' + n.ssid + '</div></div>';
-        html += '<div class="comp-info-item"><div class="comp-info-label">Segnale</div><div class="comp-info-value">' + (n.signalPercent !== null ? n.signalPercent + '% (' + n.signalDbm + ' dBm)' : '--') + '</div></div>';
+        html += '<div class="comp-info-item"><div class="comp-info-label">' + t('signal') + '</div><div class="comp-info-value">' + (n.signalPercent !== null ? n.signalPercent + '% (' + n.signalDbm + ' dBm)' : '--') + '</div></div>';
       }
       html += '<div class="comp-info-item"><div class="comp-info-label">IP</div><div class="comp-info-value">' + (n.ipAddress || '--') + '</div></div>';
       html += '<div class="comp-info-item"><div class="comp-info-label">Gateway</div><div class="comp-info-value">' + (n.gateway || '--') + '</div></div>';
-      html += '<div class="comp-info-item"><div class="comp-info-label">Interfaccia</div><div class="comp-info-value">' + (n.interface || '--') + '</div></div>';
+      html += '<div class="comp-info-item"><div class="comp-info-label">' + t('interface') + '</div><div class="comp-info-value">' + (n.interface || '--') + '</div></div>';
       html += '<div class="comp-info-item"><div class="comp-info-label">DNS</div><div class="comp-info-value">' + (n.dns || '--') + '</div></div>';
       el.innerHTML = html;
     });
   }
-
-  // ── Bluetooth ──
-  var btBtn = document.getElementById('comp-bt-toggle'), btList = document.getElementById('comp-bt-list');
-  btBtn.addEventListener('click', async () => {
-    btBtn.textContent = 'Scanning...'; btBtn.disabled = true;
-    const devices = await ipc('bluetoothScan');
-    btBtn.textContent = 'Scan'; btBtn.disabled = false;
-    btList.innerHTML = '';
-    if (devices && devices.length) {
-      devices.forEach(d => {
-        const item = document.createElement('div'); item.className = 'comp-bt-item';
-        item.innerHTML = '<span>' + d.name + '</span><button class="comp-btn secondary comp-bt-connect" data-mac="' + d.mac + '">Connect</button>';
-        btList.appendChild(item);
-      });
-      btList.querySelectorAll('.comp-bt-connect').forEach(btn => btn.addEventListener('click', async () => { btn.textContent = '...'; await ipc('bluetoothConnect', btn.dataset.mac); btn.textContent = '✓'; }));
-    } else btList.innerHTML = '<div style="color:#8E8E93;font-size:12px">No devices found</div>';
-  });
 
   // ── Hardware Info ──
   function loadHardwareInfo() {
@@ -373,28 +360,11 @@
     });
   }
 
-  // ── CPU Governor ──
-  document.getElementById('comp-governor').addEventListener('change', function() {
-    ipc('setGovernor', document.getElementById('comp-governor').value);
-  });
-
-  // ── Brightness ──
-  var brightSlider = document.getElementById('comp-brightness'), brightVal = document.getElementById('comp-brightness-val');
-  brightSlider.addEventListener('input', async () => { brightVal.textContent = brightSlider.value + '%'; await ipc('setBrightness', parseInt(brightSlider.value)); });
-
-  // ── System Power ──
-  document.getElementById('comp-reboot').addEventListener('click', function() {
-    if (confirm('Riavviare il sistema?')) ipc('rebootSystem');
-  });
-  document.getElementById('comp-shutdown').addEventListener('click', function() {
-    if (confirm('Spegnere il sistema?')) ipc('shutdownSystem');
-  });
-
   // ── Updates ──
   function loadUpdateInfo() {
     ipc('checkUpdates').then(function(u) {
       var el = document.getElementById('comp-update-info');
-      if (!u || u.error) { el.innerHTML = '<div style="color:#636366;font-size:12px">Impossibile verificare aggiornamenti</div>'; return; }
+      if (!u || u.error) { el.innerHTML = '<div style="color:#636366;font-size:12px">' + t('updateError') + '</div>'; return; }
       var html = '<div class="comp-update-row">';
       html += '<span class="comp-update-badge current">v' + u.current + '</span>';
       html += '<div style="flex:1">';
@@ -405,84 +375,36 @@
         html += '<div style="font-size:11px;color:#8E8E93">Dev: <a href="' + u.latestDev.url + '" target="_blank" style="color:#FF9500">' + u.latestDev.tag + '</a></div>';
       }
       html += '</div></div>';
-      // Show if update available
       if (u.latestStable && u.latestStable.tag !== 'v' + u.current && u.latestStable.tag > 'v' + u.current) {
-        html += '<div style="color:#30D158;font-size:12px;margin-top:4px">🟢 Nuova versione disponibile!</div>';
+        html += '<div style="color:#30D158;font-size:12px;margin-top:4px">' + t('updateAvailable') + '</div>';
       }
       el.innerHTML = html;
     });
   }
 
-  // ── Actions ──
-  document.getElementById('comp-refresh').addEventListener('click', () => location.reload());
-  document.getElementById('comp-fullscreen').addEventListener('click', () => ipc('toggleFullscreen'));
-  document.getElementById('comp-logout').addEventListener('click', () => ipc('logout'));
-  document.getElementById('comp-quit').addEventListener('click', () => ipc('quit'));
-
   // ── Notification history ──
-  var notifList = document.getElementById('comp-notif-list');
-  var notifCount = document.getElementById('comp-notif-count');
+  var notifList, notifCount;
   function renderNotifHistory(history) {
+    notifList = document.getElementById('comp-notif-list');
+    notifCount = document.getElementById('comp-notif-count');
     if (!history || !history.length) {
-      notifCount.textContent = 'Nessuna notifica';
+      notifCount.textContent = t('noNotifications');
       notifList.innerHTML = '';
       return;
     }
-    notifCount.textContent = history.length + ' notifiche';
+    notifCount.textContent = t('notifCount', { count: history.length });
     notifList.innerHTML = history.map(function(n) {
       var d = new Date(n.time);
       var ts = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
       return '<div style="padding:8px 0;border-bottom:1px solid #2C2C2E"><div style="font-size:13px;font-weight:600">' + n.title + ' <span style="color:#636366;font-size:11px">' + ts + '</span></div><div style="color:#ABABAB;font-size:12px;margin-top:2px">' + n.message + '</div></div>';
     }).join('');
   }
-  document.getElementById('comp-notif-clear').addEventListener('click', function() {
-    notifList.innerHTML = '';
-    notifCount.textContent = 'Nessuna notifica';
-  });
-
-  // ── Notification settings ──
-  var notifEnabledBtn = document.getElementById('comp-notif-enabled');
-  var notifSoundBtn = document.getElementById('comp-notif-sound');
-  var notifDndBtn = document.getElementById('comp-notif-dnd');
-  var notifDuration = document.getElementById('comp-notif-duration');
-  var notifMelody = document.getElementById('comp-notif-melody');
-
-  var notifSettings = JSON.parse(localStorage.getItem('ha_notif_settings') || '{}');
-  if (notifSettings.enabled === false) notifEnabledBtn.classList.remove('on'); else notifEnabledBtn.classList.add('on');
-  if (notifSettings.sound === false) notifSoundBtn.classList.remove('on'); else notifSoundBtn.classList.add('on');
-  if (notifSettings.dnd) notifDndBtn.classList.add('on'); else notifDndBtn.classList.remove('on');
-  if (notifSettings.duration) notifDuration.value = notifSettings.duration;
-  if (notifSettings.melody) notifMelody.value = notifSettings.melody;
-
-  function saveNotifSettings() { localStorage.setItem('ha_notif_settings', JSON.stringify(notifSettings)); }
-
-  notifEnabledBtn.addEventListener('click', function() { notifSettings.enabled = !notifEnabledBtn.classList.contains('on'); notifEnabledBtn.classList.toggle('on'); saveNotifSettings(); });
-  notifSoundBtn.addEventListener('click', function() { notifSettings.sound = !notifSoundBtn.classList.contains('on'); notifSoundBtn.classList.toggle('on'); saveNotifSettings(); if (notifSettings.sound) ipc('playNotificationSound', notifMelody.value); });
-  notifDndBtn.addEventListener('click', function() { notifSettings.dnd = !notifDndBtn.classList.contains('on'); notifDndBtn.classList.toggle('on'); saveNotifSettings(); });
-  notifDuration.addEventListener('change', function() { notifSettings.duration = parseInt(notifDuration.value); saveNotifSettings(); });
-  notifMelody.addEventListener('change', function() { notifSettings.melody = notifMelody.value; saveNotifSettings(); ipc('playNotificationSound', notifMelody.value); });
-
-  // Custom sounds
-  var customSection = document.getElementById('comp-custom-sounds');
-  var customSelect = document.getElementById('comp-notif-custom');
-  var customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = '🎵 Personalizzata'; notifMelody.appendChild(customOpt);
-  if (notifSettings.melody && notifSettings.melody.startsWith('custom:')) { notifMelody.value = '__custom__'; customSection.style.display = 'block'; }
-  notifMelody.addEventListener('change', function() {
-    if (notifMelody.value === '__custom__') {
-      customSection.style.display = 'block';
-      ipc('listCustomSounds').then(function(sounds) {
-        customSelect.innerHTML = '<option value="">-- seleziona --</option>';
-        if (sounds && sounds.length) { sounds.forEach(function(s) { var o = document.createElement('option'); o.value = 'custom:' + s.file; o.textContent = s.name; customSelect.appendChild(o); }); if (notifSettings.melody) customSelect.value = notifSettings.melody; }
-        else customSelect.innerHTML = '<option value="">Nessun file trovato</option>';
-      });
-    } else { customSection.style.display = 'none'; notifSettings.customSound = null; }
-  });
-  customSelect.addEventListener('change', function() { if (customSelect.value) { notifSettings.melody = customSelect.value; saveNotifSettings(); ipc('playNotificationSound', customSelect.value); } });
 
   // ── Channels ──
-  var channelsList = document.getElementById('comp-channels-list');
+  var channelsList;
   function renderChannels(chs) {
-    if (!chs || !Object.keys(chs).length) { channelsList.innerHTML = '<div style="color:#636366;font-size:12px;padding:8px 0">Nessun canale ancora.</div>'; return; }
+    channelsList = document.getElementById('comp-channels-list');
+    if (!chs || !Object.keys(chs).length) { channelsList.innerHTML = '<div style="color:#636366;font-size:12px;padding:8px 0">' + t('noChannels') + '</div>'; return; }
     var html = '';
     for (var id in chs) {
       var ch = chs[id];
@@ -505,14 +427,14 @@
     channelsList.querySelectorAll('[data-field="enabled"]').forEach(function(btn) { btn.addEventListener('click', function() { btn.classList.toggle('on'); ipc('updateChannel', btn.dataset.channel, { enabled: btn.classList.contains('on') }); }); });
     channelsList.querySelectorAll('[data-field="sound"]').forEach(function(sel) { sel.addEventListener('change', function() { ipc('updateChannel', sel.dataset.channel, { sound: sel.value }); ipc('playNotificationSound', sel.value); }); });
     channelsList.querySelectorAll('[data-field="priority"]').forEach(function(sel) { sel.addEventListener('change', function() { ipc('updateChannel', sel.dataset.channel, { priority: sel.value }); }); });
-    channelsList.querySelectorAll('[data-delete-channel"]').forEach(function(btn) { btn.addEventListener('click', function() { ipc('deleteChannel', btn.dataset.deleteChannel).then(function() { loadAndRenderChannels(); }); }); });
+    channelsList.querySelectorAll('[data-field="delete-channel"]').forEach(function(btn) { btn.addEventListener('click', function() { ipc('deleteChannel', btn.dataset.deleteChannel).then(function() { loadAndRenderChannels(); }); }); });
   }
   function loadAndRenderChannels() { ipc('getChannels').then(renderChannels); }
   window.__haChannels = { refresh: loadAndRenderChannels };
 
-  // Clock element reference (panel detail clock with seconds)
-  var clockEl = document.getElementById('comp-clock-bar');
+  // ── Panel clock (with seconds) ──
   function updatePanelClock() {
+    var clockEl = document.getElementById('comp-clock-bar');
     if (!clockEl) return;
     const now = new Date();
     const hh = now.getHours().toString().padStart(2,'0');
@@ -521,13 +443,13 @@
     var ct = clockEl.querySelector('.clock-time');
     if (ct) ct.textContent = hh + ':' + mm + ':' + ss;
     var cd = clockEl.querySelector('.clock-date');
-    if (cd) cd.textContent = dayNames[now.getDay()] + ' ' + now.getDate() + ' ' + monthNames[now.getMonth()];
+    if (cd) cd.textContent = t('days')[now.getDay()] + ' ' + now.getDate() + ' ' + t('months')[now.getMonth()];
   }
   setInterval(updatePanelClock, 1000);
-  updatePanelClock();
 
-  // Clock temp in panel
+  // ── Panel clock temp ──
   function updateClockTemp() {
+    var clockEl = document.getElementById('comp-clock-bar');
     if (!clockEl) return;
     ipc('getHardwareInfo').then(function(hw) {
       if (hw && hw.cpuTempC) {
@@ -540,14 +462,204 @@
   setInterval(updateClockTemp, 30000);
   setTimeout(updateClockTemp, 2000);
 
-  // ── Init ──
+  // ── Bind all panel-internal events (called after each renderPanel) ──
+  function bindPanelEvents() {
+    document.getElementById('comp-close').addEventListener('click', togglePanel);
+
+    // Language switcher
+    Object.keys(LANG_LABELS).forEach(function(lang) {
+      var btn = document.getElementById('lang-btn-' + lang);
+      if (!btn) return;
+      btn.addEventListener('click', function() {
+        currentLang = lang;
+        saveLang(lang);
+        renderPanel();
+        updateTopbarClock();
+        document.getElementById('ha-comp-topbar-btn').title = t('settings');
+        if (open) loadPanelData();
+      });
+    });
+
+    // Display Controls
+    document.getElementById('comp-display-on').addEventListener('click', function() { ipc('displayOn'); });
+    document.getElementById('comp-display-off').addEventListener('click', function() { ipc('displayOff'); });
+
+    // Schedule
+    var schedEnabled = document.getElementById('comp-schedule-enabled');
+    var schedTimes = document.getElementById('comp-schedule-times');
+    var schedOff = document.getElementById('comp-schedule-off');
+    var schedOn = document.getElementById('comp-schedule-on');
+
+    function loadSchedule() {
+      ipc('getSchedule').then(function(s) {
+        if (!s) return;
+        schedEnabled.classList.toggle('on', s.enabled);
+        schedTimes.style.display = s.enabled ? 'block' : 'none';
+        if (s.offTime) schedOff.value = s.offTime;
+        if (s.onTime) schedOn.value = s.onTime;
+      });
+    }
+    schedEnabled.addEventListener('click', function() {
+      schedEnabled.classList.toggle('on');
+      var enabled = schedEnabled.classList.contains('on');
+      schedTimes.style.display = enabled ? 'block' : 'none';
+      ipc('setSchedule', { enabled: enabled, offTime: schedOff.value, onTime: schedOn.value });
+    });
+    function saveScheduleFromInputs() {
+      ipc('setSchedule', { enabled: schedEnabled.classList.contains('on'), offTime: schedOff.value, onTime: schedOn.value });
+    }
+    schedOff.addEventListener('change', saveScheduleFromInputs);
+    schedOn.addEventListener('change', saveScheduleFromInputs);
+    window.__haScheduleLoad = loadSchedule;
+
+    // Audio
+    var volSlider = document.getElementById('comp-volume');
+    var volVal = document.getElementById('comp-volume-val');
+    var muteBtn = document.getElementById('comp-mute');
+    volSlider.addEventListener('input', async () => { volVal.textContent = volSlider.value + '%'; await ipc('setVolume', parseInt(volSlider.value)); });
+    muteBtn.addEventListener('click', async () => { const muted = muteBtn.textContent === 'Off'; muteBtn.textContent = muted ? 'On' : 'Off'; muteBtn.style.background = muted ? '#FF3B30' : '#3A3A3C'; await ipc('setMute', muted); });
+
+    var audioOutputSel = document.getElementById('comp-audio-output');
+    function loadAudioOutputs() {
+      ipc('getAudioOutputs').then(function(outputs) {
+        audioOutputSel.innerHTML = '';
+        if (!outputs || !outputs.length) { audioOutputSel.innerHTML = '<option>Default</option>'; return; }
+        outputs.forEach(function(o) {
+          var opt = document.createElement('option');
+          opt.value = o.name;
+          opt.textContent = o.description + (o.isDefault ? ' ✓' : '');
+          if (o.isDefault) opt.selected = true;
+          audioOutputSel.appendChild(opt);
+        });
+      });
+    }
+    audioOutputSel.addEventListener('change', function() { ipc('setAudioOutput', audioOutputSel.value); });
+    window.__haAudioLoad = loadAudioOutputs;
+
+    // Bluetooth
+    var btBtn = document.getElementById('comp-bt-toggle');
+    var btList = document.getElementById('comp-bt-list');
+    btBtn.addEventListener('click', async () => {
+      btBtn.textContent = 'Scanning...'; btBtn.disabled = true;
+      const devices = await ipc('bluetoothScan');
+      btBtn.textContent = 'Scan'; btBtn.disabled = false;
+      btList.innerHTML = '';
+      if (devices && devices.length) {
+        devices.forEach(d => {
+          const item = document.createElement('div'); item.className = 'comp-bt-item';
+          item.innerHTML = '<span>' + d.name + '</span><button class="comp-btn secondary comp-bt-connect" data-mac="' + d.mac + '">Connect</button>';
+          btList.appendChild(item);
+        });
+        btList.querySelectorAll('.comp-bt-connect').forEach(btn => btn.addEventListener('click', async () => { btn.textContent = '...'; await ipc('bluetoothConnect', btn.dataset.mac); btn.textContent = '✓'; }));
+      } else btList.innerHTML = '<div style="color:#8E8E93;font-size:12px">' + t('noDevicesFound') + '</div>';
+    });
+
+    // CPU Governor
+    document.getElementById('comp-governor').addEventListener('change', function() {
+      ipc('setGovernor', document.getElementById('comp-governor').value);
+    });
+
+    // Brightness
+    var brightSlider = document.getElementById('comp-brightness');
+    var brightVal = document.getElementById('comp-brightness-val');
+    brightSlider.addEventListener('input', async () => { brightVal.textContent = brightSlider.value + '%'; await ipc('setBrightness', parseInt(brightSlider.value)); });
+    window.__haBrightSlider = brightSlider;
+    window.__haBrightVal = brightVal;
+    window.__haVolSlider = volSlider;
+    window.__haVolVal = volVal;
+
+    // System Power
+    document.getElementById('comp-reboot').addEventListener('click', function() {
+      if (confirm(t('confirmReboot'))) ipc('rebootSystem');
+    });
+    document.getElementById('comp-shutdown').addEventListener('click', function() {
+      if (confirm(t('confirmShutdown'))) ipc('shutdownSystem');
+    });
+
+    // Actions
+    document.getElementById('comp-refresh').addEventListener('click', () => location.reload());
+    document.getElementById('comp-fullscreen').addEventListener('click', () => ipc('toggleFullscreen'));
+    document.getElementById('comp-logout').addEventListener('click', () => ipc('logout'));
+    document.getElementById('comp-quit').addEventListener('click', () => ipc('quit'));
+
+    // Notification clear button
+    document.getElementById('comp-notif-clear').addEventListener('click', function() {
+      var nl = document.getElementById('comp-notif-list');
+      var nc = document.getElementById('comp-notif-count');
+      if (nl) nl.innerHTML = '';
+      if (nc) nc.textContent = t('noNotifications');
+    });
+
+    // Notification settings
+    var notifEnabledBtn = document.getElementById('comp-notif-enabled');
+    var notifSoundBtn = document.getElementById('comp-notif-sound');
+    var notifDndBtn = document.getElementById('comp-notif-dnd');
+    var notifDuration = document.getElementById('comp-notif-duration');
+    var notifMelody = document.getElementById('comp-notif-melody');
+
+    var notifSettings = JSON.parse(localStorage.getItem('ha_notif_settings') || '{}');
+    if (notifSettings.enabled === false) notifEnabledBtn.classList.remove('on'); else notifEnabledBtn.classList.add('on');
+    if (notifSettings.sound === false) notifSoundBtn.classList.remove('on'); else notifSoundBtn.classList.add('on');
+    if (notifSettings.dnd) notifDndBtn.classList.add('on'); else notifDndBtn.classList.remove('on');
+    if (notifSettings.duration) notifDuration.value = notifSettings.duration;
+    if (notifSettings.melody) notifMelody.value = notifSettings.melody;
+
+    function saveNotifSettings() { localStorage.setItem('ha_notif_settings', JSON.stringify(notifSettings)); }
+
+    notifEnabledBtn.addEventListener('click', function() { notifSettings.enabled = !notifEnabledBtn.classList.contains('on'); notifEnabledBtn.classList.toggle('on'); saveNotifSettings(); });
+    notifSoundBtn.addEventListener('click', function() { notifSettings.sound = !notifSoundBtn.classList.contains('on'); notifSoundBtn.classList.toggle('on'); saveNotifSettings(); if (notifSettings.sound) ipc('playNotificationSound', notifMelody.value); });
+    notifDndBtn.addEventListener('click', function() { notifSettings.dnd = !notifDndBtn.classList.contains('on'); notifDndBtn.classList.toggle('on'); saveNotifSettings(); });
+    notifDuration.addEventListener('change', function() { notifSettings.duration = parseInt(notifDuration.value); saveNotifSettings(); });
+    notifMelody.addEventListener('change', function() { notifSettings.melody = notifMelody.value; saveNotifSettings(); ipc('playNotificationSound', notifMelody.value); });
+
+    // Custom sounds
+    var customSection = document.getElementById('comp-custom-sounds');
+    var customSelect = document.getElementById('comp-notif-custom');
+    var customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = t('customLabel');
+    notifMelody.appendChild(customOpt);
+    if (notifSettings.melody && notifSettings.melody.startsWith('custom:')) { notifMelody.value = '__custom__'; customSection.style.display = 'block'; }
+    notifMelody.addEventListener('change', function() {
+      if (notifMelody.value === '__custom__') {
+        customSection.style.display = 'block';
+        ipc('listCustomSounds').then(function(sounds) {
+          customSelect.innerHTML = '<option value="">' + t('selectPlaceholder') + '</option>';
+          if (sounds && sounds.length) {
+            sounds.forEach(function(s) { var o = document.createElement('option'); o.value = 'custom:' + s.file; o.textContent = s.name; customSelect.appendChild(o); });
+            if (notifSettings.melody) customSelect.value = notifSettings.melody;
+          } else customSelect.innerHTML = '<option value="">' + t('noFilesFound') + '</option>';
+        });
+      } else { customSection.style.display = 'none'; notifSettings.customSound = null; }
+    });
+    customSelect.addEventListener('change', function() { if (customSelect.value) { notifSettings.melody = customSelect.value; saveNotifSettings(); ipc('playNotificationSound', customSelect.value); } });
+  }
+
+  // ── Load panel data (defined here to reference bound element helpers) ──
+  function loadPanelData() {
+    ipc('getNotificationHistory').then(renderNotifHistory);
+    loadAndRenderChannels();
+    loadHardwareInfo();
+    loadNetworkInfo();
+    if (window.__haAudioLoad) window.__haAudioLoad();
+    if (window.__haScheduleLoad) window.__haScheduleLoad();
+    loadUpdateInfo();
+    updatePanelClock();
+    ipc('getGovernor').then(function(g) { var gov = document.getElementById('comp-governor'); if (gov) gov.value = g; });
+  }
+
+  // ── Init: load system info after first render ──
   ipc('getSystemInfo').then(info => {
     if (!info) return;
-    if (info.volume !== undefined) { volSlider.value = info.volume; volVal.textContent = info.volume + '%'; }
-    if (info.brightness !== undefined) { brightSlider.value = info.brightness; brightVal.textContent = info.brightness + '%'; }
-    if (info.deviceName) { document.getElementById('comp-device-name').textContent = info.deviceName; var td = document.getElementById('topbar-device'); if (td) td.textContent = info.deviceName; }
-    if (info.version) document.getElementById('comp-version').textContent = info.version;
-    if (info.sensors) document.getElementById('comp-sensor-info').textContent = 'Sensors: ' + info.sensors;
-    if (!info.hasBacklight) { var br = document.getElementById('comp-brightness-row'); if(br) br.style.display='none'; }
+    var volSlider = document.getElementById('comp-volume');
+    var volVal = document.getElementById('comp-volume-val');
+    var brightSlider = document.getElementById('comp-brightness');
+    var brightVal = document.getElementById('comp-brightness-val');
+    if (info.volume !== undefined && volSlider) { volSlider.value = info.volume; volVal.textContent = info.volume + '%'; }
+    if (info.brightness !== undefined && brightSlider) { brightSlider.value = info.brightness; brightVal.textContent = info.brightness + '%'; }
+    if (info.deviceName) { var dn = document.getElementById('comp-device-name'); if (dn) dn.textContent = info.deviceName; var td = document.getElementById('topbar-device'); if (td) td.textContent = info.deviceName; }
+    if (info.version) { var ver = document.getElementById('comp-version'); if (ver) ver.textContent = info.version; }
+    if (info.sensors) { var si = document.getElementById('comp-sensor-info'); if (si) si.textContent = t('sensors') + ': ' + info.sensors; }
+    if (!info.hasBacklight) { var br = document.getElementById('comp-brightness-row'); if (br) br.style.display = 'none'; }
   });
 })();

@@ -125,12 +125,22 @@
       <button class="kb-b dot-btn" data-k=":">:</button>
       <button class="kb-b arr-btn" data-special="left">◄</button>
       <button class="kb-b arr-btn" data-special="right">►</button>
-      <button class="kb-b space-btn" data-special="space">spazio</button>
+      <button class="kb-b space-btn" data-special="space" id="kb-space-btn">space</button>
       <button class="kb-b enter-btn" data-special="enter">↵</button>
       <button class="kb-b close-btn" data-special="close">▼</button>
     </div>
   </div>
   <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      var lang = localStorage.getItem('ha_companion_lang') || 'it';
+      window.haCompanion.getLocales().then(function(locales) {
+        var locale = locales[lang] || locales['it'];
+        if (locale && locale.spaceKey) {
+          var spaceBtn = document.getElementById('kb-space-btn');
+          if (spaceBtn) spaceBtn.textContent = locale.spaceKey;
+        }
+      });
+    });
     let activeInput = null, shifted = false, capsOn = false, pendingAuth = null, symbolsPage = false;
     function refreshLetterCase() { const u = shifted || capsOn; document.querySelectorAll('#kbPage1 .kb-key[data-k]').forEach(b => { const k = b.dataset.k; if (k.length === 1 && /[a-z]/i.test(k)) b.textContent = u ? k.toUpperCase() : k.toLowerCase(); }); }
     function switchTab(tab) { document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab)); document.getElementById('loginTab').style.display = tab === 'login' ? 'block' : 'none'; document.getElementById('tokenTab').style.display = tab === 'token' ? 'block' : 'none'; setStatus(''); }

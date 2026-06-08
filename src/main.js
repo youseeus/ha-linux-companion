@@ -399,7 +399,7 @@ function loadDashboard() {
 
     mainWindow.webContents.executeJavaScript(injectCode).then(() => {
       dashboardLoaded = false;
-      mainWindow.webContents.on('did-finish-load', function onLoad() {
+      mainWindow.webContents.on('did-finish-load', async function onLoad() {
         if (dashboardLoaded) return;
         dashboardLoaded = true;
         mainWindow.webContents.removeListener('did-finish-load', onLoad);
@@ -407,6 +407,22 @@ function loadDashboard() {
           'ha-sidebar { display: none !important; } ' +
           'hui-root { --sidebar-width: 0px !important; }'
         );
+
+        // Inject i18n locales
+        try {
+          const localesDir = path.join(__dirname, 'locales');
+          const supportedLangs = ['it', 'de', 'en'];
+          const locales = {};
+          for (const lang of supportedLangs) {
+            const filePath = path.join(localesDir, lang, 'translation.json');
+            locales[lang] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          }
+          const localesCode = 'window.__haLocales = ' + JSON.stringify(locales) + ';';
+          await mainWindow.webContents.executeJavaScript(localesCode);
+          log('[i18n] Locales injected: ' + supportedLangs.join(', '));
+        } catch (e) {
+          log('[i18n] Error injecting locales: ' + e.message);
+        }
 
         // Inject settings overlay
         try {
@@ -1276,6 +1292,17 @@ ipcMain.handle('get-sensors', async () => {
 });
 
 ipcMain.handle('get-version', () => APP_VERSION);
+
+ipcMain.handle('get-locales', () => {
+  const localesDir = path.join(__dirname, 'locales');
+  const supportedLangs = ['it', 'de', 'en'];
+  const locales = {};
+  for (const lang of supportedLangs) {
+    const filePath = path.join(localesDir, lang, 'translation.json');
+    locales[lang] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  }
+  return locales;
+});
 
 // ── Notification History ──
 const NOTIF_HISTORY_MAX = 50;
