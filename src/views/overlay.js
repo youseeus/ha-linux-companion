@@ -266,11 +266,11 @@
 
   function renderPanel() {
     panel.innerHTML = buildPanelHTML();
-    bindPanelEvents();
   }
 
   renderPanel();
   document.body.appendChild(panel);
+  bindPanelEvents();
 
   let open = false;
   function togglePanel() {
@@ -462,6 +462,7 @@
         currentLang = lang;
         saveLang(lang);
         renderPanel();
+        bindPanelEvents();
         updateTopbarClock();
         document.getElementById('ha-comp-topbar-btn').title = t('settings');
         if (open) loadPanelData();
