@@ -318,6 +318,16 @@ function createMainWindow() {
     }
   });
 
+  // Forward renderer errors to main-process log
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    if (level === 3) { // 3 = error
+      log('[Renderer] ' + message + ' (source: ' + sourceId + ':' + line + ')');
+    }
+  });
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    log('[Renderer] Process gone: ' + JSON.stringify(details));
+  });
+
   // Load the app UI
   loadAppView();
 
@@ -427,7 +437,8 @@ function loadDashboard() {
         // Inject settings overlay
         try {
           const overlayCode = fs.readFileSync(path.join(__dirname, 'views', 'overlay.js'), 'utf8');
-          mainWindow.webContents.executeJavaScript(overlayCode);
+          await mainWindow.webContents.executeJavaScript(overlayCode);
+          log('[Overlay] Injected successfully');
         } catch (e) {
           log('[Overlay] Error injecting: ' + e.message);
         }
