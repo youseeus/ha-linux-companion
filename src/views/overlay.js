@@ -297,18 +297,6 @@
 
   function ipc(name, data) { return window.haCompanion[name](data); }
 
-  // ── Load panel data ──
-  function loadPanelData() {
-    ipc('getNotificationHistory').then(renderNotifHistory);
-    loadAndRenderChannels();
-    loadHardwareInfo();
-    loadNetworkInfo();
-    loadAudioOutputs();
-    loadSchedule();
-    loadUpdateInfo();
-    ipc('getGovernor').then(function(g) { document.getElementById('comp-governor').value = g; });
-  }
-
   // ── Network Info ──
   function loadNetworkInfo() {
     ipc('getNetworkInfo').then(function(n) {
