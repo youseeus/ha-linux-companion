@@ -1,19 +1,13 @@
-# v2.2.0 — Auto-Reconnect + Kiosk Status Bar
+# Release Notes
 
-## 🆕 Features
+## v2.5.0 (2026-06-08)
 
-### 🔄 Auto-Reconnect (Health Monitor)
-- Companion automatically reconnects when HA or the server restarts
-- Pings HA every 60s (normal) or 10s (when offline)
-- On reconnect: refreshes token, reloads dashboard, restarts sensors, reconnects WebSocket
+### Bug Fixes
+- **WS reconnect storm** — when HA returns 502, the companion no longer opens 15-20 parallel WebSocket connections. Added `wsConnecting` guard and `cleanupWs()` to ensure single-connection reconnect.
+- **Dashboard shows login page after HA restart** — `loadDashboard()` now reloads config from disk (`config = loadConfig()`) and uses `auth.getAccessToken()` instead of stale `config.token` for localStorage injection.
+- **WebView stuck on HA login page** — added `did-navigate` listener that detects HA `/auth/authorize`, `/auth/login`, `/auth/token` URLs and auto-reloads the dashboard with a fresh token after 1 second.
+- **HA 2026.6.x sensor payload breaking change** — `register_sensor` now sends `unique_id` + `state` + `type` + `name` + `icon` only (no `device_class`, `state_class`, `unit_of_measurement`). `update_sensor_states` strips to `unique_id` + `state` + `type`.
 
-### 📊 Kiosk Status Bar
-- Professional top bar replaces the floating ⚙ gear button
-- Shows: clock, date, CPU temp, device name, settings gear
-- Auto-hides after 5 seconds — reappears on top-edge touch/mouse
-- Settings panel opens via gear tap or right-edge swipe
-- 50px height with 40×40 touch-friendly gear button
-
-## 🐛 Bug Fixes
-- Companion no longer gets stuck on error page after HA restart
-- WebSocket reconnects properly with token refresh
+### Compatibility
+- Home Assistant 2026.6.x (required due to mobile_app webhook API changes)
+- Home Assistant 2025.x and earlier may still work but sensor registration behavior differs
